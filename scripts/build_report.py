@@ -230,24 +230,11 @@ def build_layout_sheet(wb, data_ws, cols, months, sheet_name='결과레이아웃
         total_row = row
         group_first = row + 1
         group_last = row + 4
-        blocks.append((month, total_row, list(range(group_first, group_last + 1))))
+        unclassified_row = group_last + 1
+        blocks.append((month, total_row, list(range(group_first, group_last + 1)), unclassified_row))
 
         ws.cell(row=total_row, column=1).value = f"{month}월"
         ws.cell(row=total_row, column=1).font = openpyxl.styles.Font(bold=True)
-        for col_letter in ['B', 'C', 'E', 'G', 'I']:
-            ws[f'{col_letter}{total_row}'] = f'=SUM({col_letter}{group_first}:{col_letter}{group_last})'
-        ws[f'D{total_row}'] = f'=B{total_row}-C{total_row}'
-        ws[f'F{total_row}'] = f'=D{total_row}-E{total_row}'
-        ws[f'H{total_row}'] = f'=F{total_row}-G{total_row}'
-        ws[f'J{total_row}'] = f'=IFERROR(I{total_row}/H{total_row}*100,"")'
-        ws[f'K{total_row}'] = f'=H{total_row}-I{total_row}'
-        ws[f'L{total_row}'] = f'=IFERROR(K{total_row}/H{total_row}*100,"")'
-        ws[f'M{total_row}'] = f'=SUM(O{total_row}:U{total_row})'
-        ws[f'N{total_row}'] = f'=IFERROR(M{total_row}/H{total_row}*100,"")'
-        for col_letter, _ in CODES:
-            ws[f'{col_letter}{total_row}'] = f'=SUM({col_letter}{group_first}:{col_letter}{group_last})'
-        ws[f'V{total_row}'] = f'=K{total_row}-M{total_row}'
-        ws[f'W{total_row}'] = f'=IFERROR(V{total_row}/H{total_row}*100,"")'
 
         dept_rng = f"{data_name}!${dept_l}$2:${dept_l}${last_row}"
         month_rng = f"{data_name}!${month_l}$2:${month_l}${last_row}"
@@ -256,6 +243,38 @@ def build_layout_sheet(wb, data_ws, cols, months, sheet_name='결과레이아웃
         y_rng = f"{data_name}!${y_l}$2:${y_l}${last_row}"
         x_rng = f"{data_name}!${x_l}$2:${x_l}${last_row}"
         u_rng = f"{data_name}!${u_l}$2:${u_l}${last_row}"
+
+        # 총계 행은 "4개 그룹의 합"이 아니라 해당 월 전체를 부문 구분 없이 직접
+        # 재집계한다. 그룹 키워드(개인/전략/신사업/법인) 중 어디에도 안 걸리는
+        # 수금부문명(예: '경영지원실')이 있으면 SUM(그룹행)은 그 건을 빠뜨리므로,
+        # 총계는 반드시 독립적으로 계산해야 항상 "해당 월 전체 건수"와 일치한다.
+        base_total = f'({month_rng}="{month}")'
+        ws[f'B{total_row}'] = f'=SUMPRODUCT({base_total})'
+        ws[f'C{total_row}'] = f'=SUMPRODUCT({base_total}*(({v_rng}="01")+({v_rng}="02")))'
+        ws[f'D{total_row}'] = f'=B{total_row}-C{total_row}'
+        ws[f'E{total_row}'] = f'=SUMPRODUCT({base_total}*({z_rng}="기전환"))'
+        ws[f'F{total_row}'] = f'=D{total_row}-E{total_row}'
+        ws[f'G{total_row}'] = (
+            f'=SUMPRODUCT({base_total}*({v_rng}<>"01")*({v_rng}<>"02")*'
+            f'({z_rng}<>"기전환")*({y_rng}=FALSE))'
+        )
+        ws[f'H{total_row}'] = f'=F{total_row}-G{total_row}'
+        ws[f'I{total_row}'] = (
+            f'=SUMPRODUCT({base_total}*({v_rng}<>"01")*({v_rng}<>"02")*'
+            f'({z_rng}<>"기전환")*({y_rng}=TRUE)*({x_rng}=TRUE))'
+        )
+        ws[f'J{total_row}'] = f'=IFERROR(I{total_row}/H{total_row}*100,"")'
+        ws[f'K{total_row}'] = f'=H{total_row}-I{total_row}'
+        ws[f'L{total_row}'] = f'=IFERROR(K{total_row}/H{total_row}*100,"")'
+        for col_letter, code in CODES:
+            ws[f'{col_letter}{total_row}'] = (
+                f'=SUMPRODUCT({base_total}*({v_rng}<>"01")*({v_rng}<>"02")*({z_rng}<>"기전환")*'
+                f'({y_rng}=TRUE)*({x_rng}=FALSE)*({u_rng}="{code}"))'
+            )
+        ws[f'M{total_row}'] = f'=SUM(O{total_row}:U{total_row})'
+        ws[f'N{total_row}'] = f'=IFERROR(M{total_row}/H{total_row}*100,"")'
+        ws[f'V{total_row}'] = f'=K{total_row}-M{total_row}'
+        ws[f'W{total_row}'] = f'=IFERROR(V{total_row}/H{total_row}*100,"")'
 
         for gi, (label, keyword) in enumerate(GROUPS):
             r = group_first + gi
@@ -290,7 +309,18 @@ def build_layout_sheet(wb, data_ws, cols, months, sheet_name='결과레이아웃
             ws[f'V{r}'] = f'=K{r}-M{r}'
             ws[f'W{r}'] = f'=IFERROR(V{r}/H{r}*100,"")'
 
-        row = group_last + 2  # 그룹행 4개 다음 빈 줄 1개
+        # 미분류 행: 개인/전략/신사업/법인 어디에도 안 걸리는 수금부문명이 있으면
+        # 여기에 건수가 잡힌다 (0이 아니면 총계행 B와 4개 그룹 B 합이 서로 달라짐
+        # -> 데이터 품질 이슈를 바로 눈에 띄게 남겨서, 다음에 같은 문제가 또 생겨도
+        # 조용히 총계에서 누락되지 않고 여기서 바로 확인 가능하게 함)
+        unclassified_row = group_last + 1
+        ws.cell(row=unclassified_row, column=1).value = '미분류(그룹매칭 안됨)'
+        not_any_kw = ''.join(
+            f'*(ISNUMBER(SEARCH("{kw}",{dept_rng}))=FALSE)' for _, kw in GROUPS
+        )
+        ws[f'B{unclassified_row}'] = f'=SUMPRODUCT({base_total}{not_any_kw})'
+
+        row = unclassified_row + 2  # 미분류행 다음 빈 줄 1개
 
     return ws, blocks
 
@@ -314,7 +344,7 @@ def build_summary_sheet(wb, layout_ws, blocks, sheet_name='추천요약'):
         c.fill = openpyxl.styles.PatternFill('solid', fgColor='DDEBF7')
 
     r = 2
-    for month, total_row, group_rows in blocks:
+    for month, total_row, group_rows, unclassified_row in blocks:
         rows_to_show = [(f'{month}월 합계', total_row)] + [
             (layout_ws.cell(row=gr, column=1).value, gr) for gr in group_rows
         ]
@@ -334,6 +364,12 @@ def build_summary_sheet(wb, layout_ws, blocks, sheet_name='추천요약'):
                 for col in range(1, 12):
                     ws.cell(row=r, column=col).font = openpyxl.styles.Font(bold=True)
             r += 1
+        # 미분류 건수도 눈에 띄게 같이 보여준다 (0이면 정상, 0이 아니면 데이터 확인 필요)
+        ws.cell(row=r, column=2).value = '미분류(그룹매칭 안됨)'
+        ws.cell(row=r, column=3).value = f'={layout_name}!B{unclassified_row}'
+        ws.cell(row=r, column=2).font = openpyxl.styles.Font(italic=True, color='C00000')
+        ws.cell(row=r, column=3).font = openpyxl.styles.Font(italic=True, color='C00000')
+        r += 1
 
     # 완료율(%) 열에 3색 스케일 조건부서식 (DataBarRule은 x14 확장을 써서 LibreOffice
     # 재계산 시 제거되므로, 호환성 좋은 ColorScaleRule 사용)
