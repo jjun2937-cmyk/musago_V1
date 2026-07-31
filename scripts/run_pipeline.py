@@ -1,11 +1,14 @@
 """
 무사고전환 데이터/매핑정보 입력 파일 하나로, 아래 3단계를 한 번에 실행하는 통합 실행기.
 
-  1) build_report_v4  : 데이터 시트에 사고전환판매플랜코드 채우고, 매핑정보에 키값
-                         채우고, 레이아웃 4종(당월/전체 x 부문별/상품별)을 수식으로 생성
+  1) build_report_v5  : 데이터 시트에 사고전환판매플랜코드 채우고, 매핑정보에 키값
+                         채우고, 레이아웃 4종(당월/전체 x 부문별/상품별)을 원본
+                         템플릿 서식으로 생성
   2) recalc_util       : LibreOffice로 전체 수식 재계산 (openpyxl은 계산된 값을
                          남기지 않으므로 필수 단계)
-  3) split_report_v4   : 데이터 파일(수식 유지)과 결과 파일(레이아웃 값만)로 분리
+  3) split_report_v5   : 데이터 파일(수식 유지)과 결과 파일(레이아웃 값만)로 분리
+                         (분리 과정에서 데이터 파일 쪽 수식 캐시값이 openpyxl에
+                         의해 지워지므로, 분리 후 데이터 파일을 한 번 더 재계산)
 
 요구사항: LibreOffice(soffice)가 설치되어 있어야 함
   - Ubuntu/Debian: sudo apt-get install libreoffice-calc
@@ -26,9 +29,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import openpyxl
 
-import build_report_v4 as builder
+import build_report_v5 as builder
 import recalc_util
-from split_report_v4 import LAYOUT_SHEET_NAMES, copy_values_only
+from split_report_v5 import LAYOUT_SHEET_NAMES, copy_values_only
 
 
 def run(input_path, data_out_path, result_out_path, timeout=600, keep_combined=False):
@@ -93,10 +96,20 @@ def run(input_path, data_out_path, result_out_path, timeout=600, keep_combined=F
         wb_formulas.save(data_out_path)
         wb_formulas.close()
 
+        # *** 중요 *** 위 저장 과정에서 데이터 파일 쪽 수식(사고전환판매플랜코드,
+        # 매핑정보 키값)의 캐시된 계산값이 openpyxl에 의해 지워지므로, 다시
+        # 한 번 재계산해서 복원한다 (안 하면 그 두 열이 전부 공란으로 보임).
+        print("  데이터 파일 재계산 중 (분리 과정에서 지워진 수식 캐시값 복원)...")
+        data_recalc = recalc_util.recalc(data_out_path, timeout=timeout)
+        if 'error' in data_recalc:
+            print(f"  ! 데이터 파일 재계산 실패: {data_recalc['error']}", file=sys.stderr)
+            sys.exit(1)
+        print(f"  - 데이터 파일 재계산 상태: {data_recalc['status']}, 수식 오류: {data_recalc['total_errors']}건")
+
         print(f"  - 데이터 파일 -> {data_out_path}")
         print(f"  - 결과 파일   -> {result_out_path}")
         print("완료.")
-        return result['total_errors'] == 0
+        return result['total_errors'] == 0 and data_recalc['total_errors'] == 0
     finally:
         if keep_combined:
             print(f"(--keep-combined) 결합 중간 파일 보존됨: {combined_path}")
