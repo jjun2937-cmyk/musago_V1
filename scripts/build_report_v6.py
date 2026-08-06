@@ -456,7 +456,23 @@ def write_detail_header(ws, row):
         _hcell(ws, r0 + 1, col)
         _hcell(ws, r0 + 2, col, label)
 
+    _apply_header_dividers(ws, r0, {DC['done'], DC['not_done']}, {DC['done_pct'], DC['idle_pct']})
+
     return row + HEADER_ROWS
+
+
+def _apply_header_dividers(ws, r0, medium_left_cols, medium_right_cols):
+    """헤더 3행에도 본문과 동일한 굵은 구획선을 적용하고, 맨 윗행은 구획선
+    시작 열부터 끝까지 윗변도 굵게(원본 템플릿의 헤더 상단 강조선)."""
+    top_from = min(medium_left_cols) if medium_left_cols else None
+    for rr in range(r0, r0 + HEADER_ROWS):
+        for col in range(2, 23):
+            cell = ws.cell(row=rr, column=col)
+            b = cell.border
+            left = MEDIUM if col in medium_left_cols else b.left
+            right = MEDIUM if col in medium_right_cols else b.right
+            top = MEDIUM if (rr == r0 and top_from is not None and col >= top_from) else b.top
+            cell.border = Border(top=top, bottom=b.bottom, left=left, right=right)
 
 
 def write_group_block(ws, row0, group_label_col, group_label, tier_formulas):
@@ -580,11 +596,21 @@ def build_detail_sheet(wb, sheet_name, data_ws_name, cols, months, group_col_key
 
     row = 1
     row_map = {}
+    tall_rows = []
+    header_rows = []
     for i, month in enumerate(months):
         if i % months_per_header == 0:
+            tall_rows.append(row)
+            header_rows.extend(range(row, row + HEADER_ROWS))
             row = write_detail_header(ws, row)
         row, month_map = write_month_block(ws, row, dr, month, group_letter, group_labels_values)
         row_map[month] = month_map
+        # 월 블록 사이 빈 행(원본 템플릿과 동일) - 마지막 달 뒤에는 넣지 않음
+        if i < len(months) - 1:
+            tall_rows.append(row)
+            row += 1
+    ws._tall_rows = tall_rows
+    ws._header_rows = set(header_rows)
     return ws, row_map
 
 
@@ -648,6 +674,8 @@ def write_summary_header(ws, row):
         _hcell(ws, r0 + 1, col)
         _hcell(ws, r0 + 2, col, label)
 
+    _apply_header_dividers(ws, r0, {SC['done'], SC['not_done']}, {SC['done_pct'], SC['idle_pct']})
+
     return row + HEADER_ROWS
 
 
@@ -690,9 +718,11 @@ def build_summary_sheet(wb, sheet_name, detail_sheet_name, months, group_labels,
     SC = SUMMARY_COLS
     ws = wb.create_sheet(sheet_name)
     row = 1
+    header_rows = set(range(1, 1 + HEADER_ROWS))
     row = write_summary_header(ws, row)
     month_col = SC['month']
-    for month in months:
+    tall_rows = [1]
+    for i, month in enumerate(months):
         month_start = row
         month_label = f'{int(month) if str(month).isdigit() else month}월'
         ws.cell(row=row, column=month_col, value=month_label)
@@ -704,6 +734,11 @@ def build_summary_sheet(wb, sheet_name, detail_sheet_name, months, group_labels,
                         end_row=month_end, end_column=month_col)
         ws.cell(row=month_start, column=month_col).alignment = Alignment(
             horizontal='center', vertical='center')
+        if i < len(months) - 1:
+            tall_rows.append(row)
+            row += 1
+    ws._tall_rows = tall_rows
+    ws._header_rows = header_rows
     return ws
 
 
@@ -711,11 +746,20 @@ def build_summary_sheet(wb, sheet_name, detail_sheet_name, months, group_labels,
 # 6) 서식 적용
 # ---------------------------------------------------------------------------
 
-def _apply_common_style(ws, ncols, pct_cols, count_cols):
+def _apply_common_style(ws, ncols, pct_cols, count_cols, medium_left_cols=(), medium_right_cols=(),
+                         header_rows=()):
+    """원본 템플릿의 테두리: 기본은 얇은 선(thin), 특정 열 경계(예: 전환완료
+    앞/뒤, 미전환 앞, 맨 오른쪽 끝)만 굵은 선(medium)으로 구획을 나눈다.
+    header_rows(헤더가 이미 자체 서식을 갖고 있는 행)는 건드리지 않는다."""
+    header_rows = set(header_rows)
     for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=2, max_col=1 + ncols):
         for cell in row:
+            if cell.row in header_rows:
+                continue
             cell.font = Font(name=FONT_NAME, size=10)
-            cell.border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
+            left = MEDIUM if cell.column in medium_left_cols else THIN
+            right = MEDIUM if cell.column in medium_right_cols else THIN
+            cell.border = Border(top=THIN, bottom=THIN, left=left, right=right)
             if cell.column in pct_cols:
                 cell.number_format = RATIO_FMT
                 cell.alignment = Alignment(horizontal='right', vertical='center')
@@ -726,6 +770,11 @@ def _apply_common_style(ws, ncols, pct_cols, count_cols):
                 cell.alignment = Alignment(horizontal='center', vertical='center')
 
 
+def _apply_tall_rows(ws):
+    for r in getattr(ws, '_tall_rows', []):
+        ws.row_dimensions[r].height = 17.25
+
+
 def style_detail_sheet(ws, row_map):
     DC = DETAIL_COLS
     ncols = max(DC.values())
@@ -733,7 +782,11 @@ def style_detail_sheet(ws, row_map):
     count_cols = {DC['target'], DC['accident'], DC['conv_target'], DC['done'], DC['not_done'],
                   DC['plan'], DC['code1'], DC['code2'], DC['code3'], DC['code4'], DC['code5'],
                   DC['idle']}
-    _apply_common_style(ws, ncols, pct_cols, count_cols)
+    # 원본 템플릿 테두리 구획: 전환완료(I) 앞/전환률(J) 뒤, 미전환(K) 앞, 맨 끝(V) 뒤
+    medium_left = {DC['done'], DC['not_done']}
+    medium_right = {DC['done_pct'], DC['idle_pct']}
+    header_rows = getattr(ws, '_header_rows', set())
+    _apply_common_style(ws, ncols, pct_cols, count_cols, medium_left, medium_right, header_rows)
 
     for month, groups in row_map.items():
         for label, tier_rows in groups.items():
@@ -744,11 +797,12 @@ def style_detail_sheet(ws, row_map):
                 for c in range(2, 2 + ncols):
                     ws.cell(row=r, column=c).fill = fill
 
-    widths = {'B': 6, 'C': 4, 'D': 12, 'E': 5, 'F': 9, 'G': 8, 'H': 9, 'I': 9, 'J': 8,
-              'K': 9, 'L': 8, 'M': 3, 'N': 8, 'O': 8, 'P': 8, 'Q': 8, 'R': 8, 'S': 8,
-              'T': 8, 'U': 9, 'V': 8}
+    # 원본 템플릿이 실제로 커스텀 폭을 지정한 열만 반영, 나머지는 기본폭 유지
+    widths = {'B': 5.625, 'D': 11.375, 'E': 5.25, 'F': 8.375, 'J': 6.375, 'K': 8.375,
+              'L': 6.375, 'M': 8.0, 'N': 6.375, 'T': 8.625, 'U': 8.375, 'V': 6.375}
     for col, width in widths.items():
         ws.column_dimensions[col].width = width
+    _apply_tall_rows(ws)
     ws.sheet_view.showGridLines = False
 
 
@@ -759,18 +813,21 @@ def style_summary_sheet(ws):
     count_cols = {SC['target'], SC['accident'], SC['conv_target'], SC['done'], SC['not_done'],
                   SC['plan'], SC['code1'], SC['code2'], SC['code3'], SC['code4'], SC['code5'],
                   SC['idle']}
-    _apply_common_style(ws, ncols, pct_cols, count_cols)
+    medium_left = {SC['done'], SC['not_done']}
+    medium_right = {SC['done_pct'], SC['idle_pct']}
+    header_rows = getattr(ws, '_header_rows', set())
+    _apply_common_style(ws, ncols, pct_cols, count_cols, medium_left, medium_right, header_rows)
 
     for r in range(1, ws.max_row + 1):
         gcell = ws.cell(row=r, column=SC['group'])
         if gcell.value not in (None,):
             gcell.fill = GROUP_FILL
 
-    widths = {'B': 6, 'C': 8, 'D': 9, 'E': 8, 'F': 9, 'G': 9, 'H': 8,
-              'I': 9, 'J': 8, 'K': 3, 'L': 8, 'M': 8, 'N': 8, 'O': 8, 'P': 8,
-              'Q': 8, 'R': 8, 'S': 9, 'T': 8}
+    widths = {'B': 3.125, 'H': 5.75, 'I': 9.5, 'J': 5.75, 'L': 5.75, 'M': 8.375,
+              'R': 8.0, 'S': 8.75, 'T': 5.75}
     for col, width in widths.items():
         ws.column_dimensions[col].width = width
+    _apply_tall_rows(ws)
     ws.sheet_view.showGridLines = False
 
 
