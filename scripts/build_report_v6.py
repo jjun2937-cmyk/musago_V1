@@ -364,14 +364,53 @@ DETAIL_LABELS = [
 ]
 
 
+HEADER_FILL = PatternFill('solid', fgColor='FFFFFF')
+
+# 3행짜리 병합헤더에서, (열그룹 시작~끝)에 상위 라벨을 걸고 그 아래 개별 라벨을
+# 붙이는 열들. 그 외 열은 3행 전체를 세로 병합해서 라벨 하나만 건다.
+DETAIL_GROUPED_HEADER = ('plan', 'code5', '현장활동확인', ['전환예정', '연락두절', '사고있음', '고객거부', '압류계약', 'ARS거부'])
+DETAIL_SINGLE_LABELS = {
+    'month': '월', 'group': '구분', 'tier': '연차', 'target': '대상', 'accident': '사고유',
+    'conv_target': '전환대상\n(A-B)', 'done': '전환완료', 'done_pct': '전환률(%)',
+    'not_done': '미전환\n(C-D)', 'not_done_pct': '미전환률(%)', 'activity_sum': '현장활동확인',
+    'activity_pct': '현장비율(%)', 'idle': '미활동', 'idle_pct': '전체比(%)',
+}
+
+
+def _style_header_cell(c):
+    c.font = HEADER_FONT
+    c.fill = HEADER_FILL
+    c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    c.border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
+
+
 def write_detail_header(ws, row):
+    """템플릿처럼 3행에 걸친 병합 헤더를 만든다."""
     L = get_column_letter
-    for key, col in DETAIL_COLS.items():
-        c = ws.cell(row=row, column=col, value=DETAIL_LABELS[col - 2])
-        c.font = HEADER_FONT
-        c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        c.border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
-    return row + 1
+    DC = DETAIL_COLS
+    r0 = row
+    grouped_start, grouped_end, grouped_label, grouped_leaves = DETAIL_GROUPED_HEADER
+    c_start, c_end = DC[grouped_start], DC[grouped_end]
+
+    for key, col in DC.items():
+        if key in DETAIL_SINGLE_LABELS:
+            ws.merge_cells(start_row=r0, start_column=col, end_row=r0 + 2, end_column=col)
+            c = ws.cell(row=r0, column=col, value=DETAIL_SINGLE_LABELS[key])
+            _style_header_cell(c)
+            for rr in range(r0, r0 + 3):
+                _style_header_cell(ws.cell(row=rr, column=col))
+
+    ws.merge_cells(start_row=r0, start_column=c_start, end_row=r0 + 1, end_column=c_end)
+    c = ws.cell(row=r0, column=c_start, value=grouped_label)
+    _style_header_cell(c)
+    for col in range(c_start, c_end + 1):
+        for rr in (r0, r0 + 1):
+            _style_header_cell(ws.cell(row=rr, column=col))
+    for i, leaf in enumerate(grouped_leaves):
+        c = ws.cell(row=r0 + 2, column=c_start + i, value=leaf)
+        _style_header_cell(c)
+
+    return row + 3
 
 
 def write_detail_group(ws, row, dr, month, group_letter, group_value, tier_rows_out=None):
@@ -497,12 +536,31 @@ def build_detail_sheet(wb, sheet_name, data_ws_name, cols, months, group_col_key
     row_map = {}
     for month in months:
         row_map[month] = {}
+        month_start = row
         for gv in group_values:
             tier_rows_out = {}
             row = write_detail_group(ws, row, dr, month, group_letter, gv, tier_rows_out)
             row_map[month][gv] = tier_rows_out[gv]
         row = write_detail_total(ws, row, dr, month, row_map[month])
         row_map[month]['합계'] = list(range(row - 5, row))
+        month_end = row - 1
+
+        # 월 셀은 그 달 블록 전체(합계행 포함)에 걸쳐 병합
+        L = get_column_letter
+        month_col = DETAIL_COLS['month']
+        ws.merge_cells(start_row=month_start, start_column=month_col,
+                        end_row=month_end, end_column=month_col)
+        ws.cell(row=month_start, column=month_col).alignment = Alignment(
+            horizontal='center', vertical='center')
+
+        # 그룹명 셀은 그 그룹의 연차 1~5행에 걸쳐 병합 + 노란색 강조
+        group_col = DETAIL_COLS['group']
+        for gv, tier_rows in row_map[month].items():
+            r0, r1 = tier_rows[0], tier_rows[-1]
+            ws.merge_cells(start_row=r0, start_column=group_col, end_row=r1, end_column=group_col)
+            gcell = ws.cell(row=r0, column=group_col)
+            gcell.alignment = Alignment(horizontal='center', vertical='center')
+            gcell.fill = TOTAL_FILL if gv == '합계' else GROUP_FILL
     return ws, row_map
 
 
@@ -519,13 +577,41 @@ SUMMARY_LABELS = [
 ]
 
 
+SUMMARY_GROUPED_HEADER = ('plan', 'code5', '현장활동확인', ['전환예정', '연락두절', '사고있음', '고객거부', '압류계약', 'ARS거부'])
+SUMMARY_SINGLE_LABELS = {
+    'month': '월', 'group': '구분', 'target': '대상', 'accident': '사고유',
+    'conv_target': '전환대상\n(A-B)', 'done': '전환완료', 'done_pct': '전환률(%)',
+    'not_done': '미전환\n(C-D)', 'not_done_pct': '미전환률(%)', 'activity_sum': '현장활동확인',
+    'activity_pct': '현장비율(%)', 'idle': '미활동', 'idle_pct': '전체比(%)',
+}
+
+
 def write_summary_header(ws, row):
-    for key, col in SUMMARY_COLS.items():
-        c = ws.cell(row=row, column=col, value=SUMMARY_LABELS[col - 2])
-        c.font = HEADER_FONT
-        c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        c.border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
-    return row + 1
+    """세부보고와 동일한 3행 병합 헤더."""
+    SC = SUMMARY_COLS
+    r0 = row
+    grouped_start, grouped_end, grouped_label, grouped_leaves = SUMMARY_GROUPED_HEADER
+    c_start, c_end = SC[grouped_start], SC[grouped_end]
+
+    for key, col in SC.items():
+        if key in SUMMARY_SINGLE_LABELS:
+            ws.merge_cells(start_row=r0, start_column=col, end_row=r0 + 2, end_column=col)
+            c = ws.cell(row=r0, column=col, value=SUMMARY_SINGLE_LABELS[key])
+            _style_header_cell(c)
+            for rr in range(r0, r0 + 3):
+                _style_header_cell(ws.cell(row=rr, column=col))
+
+    ws.merge_cells(start_row=r0, start_column=c_start, end_row=r0 + 1, end_column=c_end)
+    c = ws.cell(row=r0, column=c_start, value=grouped_label)
+    _style_header_cell(c)
+    for col in range(c_start, c_end + 1):
+        for rr in (r0, r0 + 1):
+            _style_header_cell(ws.cell(row=rr, column=col))
+    for i, leaf in enumerate(grouped_leaves):
+        c = ws.cell(row=r0 + 2, column=c_start + i, value=leaf)
+        _style_header_cell(c)
+
+    return row + 3
 
 
 def write_summary_row(ws, row, month, group_value, detail_sheet_name, tier_rows):
@@ -566,10 +652,17 @@ def build_summary_sheet(wb, sheet_name, detail_sheet_name, months, group_values,
     ws = wb.create_sheet(sheet_name)
     row = 1
     row = write_summary_header(ws, row)
+    month_col = SUMMARY_COLS['month']
     for month in months:
+        month_start = row
         for gv in group_values:
             row = write_summary_row(ws, row, month, gv, detail_sheet_name, row_map[month][gv])
         row = write_summary_row(ws, row, month, '합계', detail_sheet_name, row_map[month]['합계'])
+        month_end = row - 1
+        ws.merge_cells(start_row=month_start, start_column=month_col,
+                        end_row=month_end, end_column=month_col)
+        ws.cell(row=month_start, column=month_col).alignment = Alignment(
+            horizontal='center', vertical='center')
     return ws
 
 
@@ -577,7 +670,9 @@ def build_summary_sheet(wb, sheet_name, detail_sheet_name, months, group_values,
 # 4) 서식 적용
 # ---------------------------------------------------------------------------
 
-def style_detail_sheet(ws, months, group_values):
+def style_detail_sheet(ws, row_map, header_rows=3):
+    """row_map: build_detail_sheet가 반환한 {month: {group_value: [tier_rows...]}}.
+    합계 행은 여기서 뽑아내 파란색으로, 그 외 그룹행은 노란 그룹명 셀 유지."""
     L = get_column_letter
     DC = DETAIL_COLS
     ncols = len(DC)
@@ -585,6 +680,9 @@ def style_detail_sheet(ws, months, group_values):
     count_cols = {DC['target'], DC['accident'], DC['conv_target'], DC['done'], DC['not_done'],
                   DC['plan'], DC['code1'], DC['code2'], DC['code3'], DC['code4'], DC['code5'],
                   DC['activity_sum'], DC['idle']}
+    total_rows = set()
+    for month, groups in row_map.items():
+        total_rows.update(groups['합계'])
 
     for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=2, max_col=1 + ncols):
         for cell in row:
@@ -598,13 +696,8 @@ def style_detail_sheet(ws, months, group_values):
                 cell.alignment = Alignment(horizontal='right', vertical='center')
             else:
                 cell.alignment = Alignment(horizontal='center', vertical='center')
-            if row[0].row > 1 and ws.cell(row=row[0].row, column=DC['group']).value == '합계':
+            if row[0].row in total_rows:
                 cell.fill = TOTAL_FILL
-
-    for r in range(2, ws.max_row + 1):
-        gcell = ws.cell(row=r, column=DC['group'])
-        if gcell.value not in (None, '합계'):
-            gcell.fill = GROUP_FILL
 
     widths = {'B': 6, 'C': 14, 'D': 5, 'E': 9, 'F': 8, 'G': 9, 'H': 9, 'I': 8,
               'J': 9, 'K': 9, 'L': 8, 'M': 8, 'N': 8, 'O': 8, 'P': 8, 'Q': 8,
@@ -691,11 +784,11 @@ def build(input_path, output_path):
     print("[2/3] 레이아웃(세부보고/합산보고 x 부문별/상품별) 생성 중...")
     ws_detail_dept, rows_dept = build_detail_sheet(
         wb, '세부보고_부문별', data_ws.title, cols, months, 'dept', depts)
-    style_detail_sheet(ws_detail_dept, months, depts)
+    style_detail_sheet(ws_detail_dept, rows_dept)
 
     ws_detail_prod, rows_prod = build_detail_sheet(
         wb, '세부보고_상품별', data_ws.title, cols, months, 'product', products)
-    style_detail_sheet(ws_detail_prod, months, products)
+    style_detail_sheet(ws_detail_prod, rows_prod)
 
     ws_summary_dept = build_summary_sheet(
         wb, '합산보고_부문별', '세부보고_부문별', months, depts, rows_dept)
