@@ -26,6 +26,7 @@
 """
 import argparse
 import os
+import shutil
 import sys
 import tempfile
 
@@ -39,9 +40,17 @@ from split_report_v6 import split
 def run(input_path, data_out_path, report_out_path, timeout=900, keep_combined=False):
     combined_fd, combined_path = tempfile.mkstemp(suffix='.xlsx', prefix='musago_combined_v6_')
     os.close(combined_fd)
+    style_fd, style_ref_path = tempfile.mkstemp(suffix='.xlsx', prefix='musago_styleref_v6_')
+    os.close(style_fd)
 
     try:
         builder.build(input_path, combined_path)
+
+        # *** 중요 *** LibreOffice가 대용량(11만 행 규모) 파일을 재계산/재저장할
+        # 때 셀 서식(배경색·테두리)을 시트 전체에서 초기화해버리는 현상이 관측돼,
+        # 재계산 전 원본을 서식 보존용으로 따로 복사해둔다(분리 단계에서 값은
+        # 재계산본, 서식은 이 원본에서 가져온다).
+        shutil.copy2(combined_path, style_ref_path)
 
         print(f"[재계산] LibreOffice로 전체 수식 재계산 중 (최대 {timeout}초)...")
         result = recalc_util.recalc(combined_path, timeout=timeout)
@@ -55,7 +64,8 @@ def run(input_path, data_out_path, report_out_path, timeout=900, keep_combined=F
                 print(f"      {c}")
 
         print("[분리] 데이터 파일 / 보고 파일 분리 중...")
-        data_ok = split(combined_path, data_out_path, report_out_path, timeout=timeout)
+        data_ok = split(combined_path, data_out_path, report_out_path, timeout=timeout,
+                         style_source_path=style_ref_path)
 
         print(f"  - 데이터 파일 -> {data_out_path}")
         print(f"  - 보고 파일   -> {report_out_path}")
@@ -69,6 +79,10 @@ def run(input_path, data_out_path, report_out_path, timeout=900, keep_combined=F
                 os.remove(combined_path)
             except OSError:
                 pass
+        try:
+            os.remove(style_ref_path)
+        except OSError:
+            pass
 
 
 def main():

@@ -606,6 +606,7 @@ def build_detail_sheet(wb, sheet_name, data_ws_name, cols, months, group_col_key
     row_map = {}
     tall_rows = []
     header_rows = []
+    gap_rows = []
     for i, month in enumerate(months):
         if i % months_per_header == 0:
             tall_rows.append(row)
@@ -613,12 +614,16 @@ def build_detail_sheet(wb, sheet_name, data_ws_name, cols, months, group_col_key
             row = write_detail_header(ws, row)
         row, month_map = write_month_block(ws, row, dr, month, group_letter, group_labels_values)
         row_map[month] = month_map
-        # 월 블록 사이 빈 행(원본 템플릿과 동일) - 마지막 달 뒤에는 넣지 않음
+        # 월 블록 사이 빈 행(원본 템플릿과 동일) - 마지막 달 뒤에는 넣지 않음.
+        # 원본 템플릿에서 이 행은 테두리조차 없는 완전한 빈 행이므로 서식
+        # 적용 대상에서도 제외한다(_apply_common_style에서 건너뜀).
         if i < len(months) - 1:
             tall_rows.append(row)
+            gap_rows.append(row)
             row += 1
     ws._tall_rows = tall_rows
     ws._header_rows = set(header_rows)
+    ws._gap_rows = set(gap_rows)
     return ws, row_map
 
 
@@ -730,6 +735,7 @@ def build_summary_sheet(wb, sheet_name, detail_sheet_name, months, group_labels,
     row = write_summary_header(ws, row)
     month_col = SC['month']
     tall_rows = [1]
+    gap_rows = []
     for i, month in enumerate(months):
         month_start = row
         month_label = f'{int(month) if str(month).isdigit() else month}월'
@@ -745,9 +751,11 @@ def build_summary_sheet(wb, sheet_name, detail_sheet_name, months, group_labels,
             horizontal='center', vertical='center')
         if i < len(months) - 1:
             tall_rows.append(row)
+            gap_rows.append(row)
             row += 1
     ws._tall_rows = tall_rows
     ws._header_rows = header_rows
+    ws._gap_rows = set(gap_rows)
     return ws
 
 
@@ -794,8 +802,10 @@ def style_detail_sheet(ws, row_map):
     # 원본 템플릿 테두리 구획: 전환완료(I) 앞/전환률(J) 뒤, 미전환(K) 앞, 맨 끝(V) 뒤
     medium_left = {DC['done'], DC['not_done']}
     medium_right = {DC['done_pct'], DC['idle_pct']}
-    header_rows = getattr(ws, '_header_rows', set())
-    _apply_common_style(ws, ncols, pct_cols, count_cols, medium_left, medium_right, header_rows)
+    # 원본 템플릿: 월 블록 사이 빈 행은 테두리조차 없는 완전한 빈 행이므로
+    # 헤더와 마찬가지로 공통 서식(테두리/폰트/정렬) 적용에서 제외한다.
+    skip_rows = getattr(ws, '_header_rows', set()) | getattr(ws, '_gap_rows', set())
+    _apply_common_style(ws, ncols, pct_cols, count_cols, medium_left, medium_right, skip_rows)
 
     for month, groups in row_map.items():
         for label, tier_rows in groups.items():
@@ -831,7 +841,10 @@ def style_summary_sheet(ws):
     medium_left = {SC['done'], SC['not_done']}
     medium_right = {SC['done_pct'], SC['idle_pct']}
     header_rows = getattr(ws, '_header_rows', set())
-    _apply_common_style(ws, ncols, pct_cols, count_cols, medium_left, medium_right, header_rows)
+    # 원본 템플릿: 월 블록 사이 빈 행은 테두리조차 없는 완전한 빈 행이므로
+    # 헤더와 마찬가지로 공통 서식(테두리/폰트/정렬) 적용에서 제외한다.
+    skip_rows = header_rows | getattr(ws, '_gap_rows', set())
+    _apply_common_style(ws, ncols, pct_cols, count_cols, medium_left, medium_right, skip_rows)
 
     # 원본 템플릿: 합산보고에는 부문별 강조색이 따로 없고, 비율(%)열만 헤더의
     # '%' 라벨행부터 데이터 끝까지 연한 초록으로 칠해져 있다(빈 간격행은 제외).

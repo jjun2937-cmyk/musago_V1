@@ -17,7 +17,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import openpyxl
-from openpyxl.styles import Font, Alignment
+from openpyxl.styles import Font
 import recalc_util
 
 LAYOUT_SHEET_NAMES = [
@@ -29,56 +29,63 @@ LAYOUT_SHEET_NAMES = [
 FONT_NAME = '맑은 고딕'
 
 
-def copy_values_only(src_ws, dst_wb, sheet_name):
+def copy_values_only(value_ws, style_ws, dst_wb, sheet_name):
+    """value_ws(재계산된 값)에서 값을, style_ws(재계산 전 원본, 서식 보존)에서
+    서식/병합/열너비/행높이를 가져와 합친다.
+
+    LibreOffice가 대용량 파일(11만 행 규모)을 재계산/재저장하는 과정에서 셀
+    서식(배경색·테두리·정렬)을 시트 전체에 걸쳐 초기화해버리는 현상이
+    관측되어(작은 샘플에서는 재현되지 않음, 값/병합/열너비는 멀쩡함), 재계산
+    자체는 값 캐시를 얻는 용도로만 신뢰하고 서식은 재계산을 타지 않은 원본
+    파일에서 가져오도록 분리했다."""
     dst_ws = dst_wb.create_sheet(sheet_name)
-    # LibreOffice가 대용량 파일을 재계산/저장하는 과정에서 일부 병합 셀의
-    # 정렬(가운데맞춤 등)을 'general'로 초기화해버리는 경우가 있어서(작은
-    # 샘플에서는 재현되지 않고 실제 11만 행 데이터에서만 관측됨), 값이 있는
-    # 병합 대표 셀은 정렬이 비어있으면 가운데맞춤으로 복원한다.
-    merge_anchors = {(mr.min_row, mr.min_col) for mr in src_ws.merged_cells.ranges}
-    for row in src_ws.iter_rows():
-        for cell in row:
-            if cell.value is None:
+    for row in style_ws.iter_rows():
+        for style_cell in row:
+            value_cell = value_ws.cell(row=style_cell.row, column=style_cell.column)
+            # 값이 없어도(예: C열 스파인 배경색만 있는 빈 칸) 서식이 있으면
+            # 여전히 옮겨 담아야 한다 - 값 기준으로만 건너뛰면 배경색이 없는
+            # 셀처럼 사라져버린다.
+            if value_cell.value is None and not style_cell.has_style:
                 continue
-            new_cell = dst_ws.cell(row=cell.row, column=cell.column, value=cell.value)
-            if cell.has_style:
+            new_cell = dst_ws.cell(row=style_cell.row, column=style_cell.column,
+                                    value=value_cell.value)
+            if style_cell.has_style:
                 # LibreOffice가 재계산/저장하면서 '맑은 고딕'이 시스템에 없으면 자체
                 # 대체 폰트(예: WenQuanYi Zen Hei)로 폰트명을 바꿔 써버리는 문제가
                 # 있어서, 크기/굵기/색상은 그대로 두고 이름만 강제로 복원한다.
-                f = cell.font
+                f = style_cell.font
                 new_cell.font = Font(name=FONT_NAME, size=f.size, bold=f.bold,
                                       italic=f.italic, color=f.color)
-                new_cell.fill = cell.fill.copy()
-                new_cell.border = cell.border.copy()
-                align = cell.alignment
-                if (align.horizontal in (None, 'general')
-                        and (cell.row, cell.column) in merge_anchors):
-                    new_cell.alignment = Alignment(horizontal='center', vertical='center',
-                                                    wrap_text=align.wrap_text)
-                else:
-                    new_cell.alignment = align.copy()
-                new_cell.number_format = cell.number_format
-    for coord, dim in src_ws.column_dimensions.items():
+                new_cell.fill = style_cell.fill.copy()
+                new_cell.border = style_cell.border.copy()
+                new_cell.alignment = style_cell.alignment.copy()
+                new_cell.number_format = style_cell.number_format
+    for coord, dim in style_ws.column_dimensions.items():
         if dim.width:
             dst_ws.column_dimensions[coord].width = dim.width
-    for r, dim in src_ws.row_dimensions.items():
+    for r, dim in style_ws.row_dimensions.items():
         if dim.height:
             dst_ws.row_dimensions[r].height = dim.height
-    for merged_range in src_ws.merged_cells.ranges:
+    for merged_range in style_ws.merged_cells.ranges:
         dst_ws.merge_cells(str(merged_range))
-    dst_ws.sheet_view.showGridLines = src_ws.sheet_view.showGridLines
+    dst_ws.sheet_view.showGridLines = style_ws.sheet_view.showGridLines
     return dst_ws
 
 
-def split(combined_path, data_out_path, report_out_path, timeout=600):
-    # 1) 보고 파일: 재계산된 값(data_only=True)만 읽어서 새 워크북에 값+서식으로 복사
+def split(combined_path, data_out_path, report_out_path, timeout=600, style_source_path=None):
+    # 1) 보고 파일: 값은 재계산된 결합 파일(data_only=True)에서, 서식은
+    # 재계산을 타지 않은 원본(style_source_path, 없으면 결합 파일 자체)에서
+    # 가져와 새 워크북에 합쳐 담는다.
     wb_values = openpyxl.load_workbook(combined_path, data_only=True)
+    wb_styles = (openpyxl.load_workbook(style_source_path, data_only=False)
+                 if style_source_path else openpyxl.load_workbook(combined_path, data_only=False))
     report_wb = openpyxl.Workbook()
     report_wb.remove(report_wb.active)
     for name in LAYOUT_SHEET_NAMES:
-        copy_values_only(wb_values[name], report_wb, name)
+        copy_values_only(wb_values[name], wb_styles[name], report_wb, name)
     report_wb.save(report_out_path)
     wb_values.close()
+    wb_styles.close()
     print(f"보고 파일(값만, 레이아웃 {len(LAYOUT_SHEET_NAMES)}종) 저장 완료 -> {report_out_path}")
 
     # 2) 데이터 파일: 수식 유지된 원본에서 레이아웃 시트만 제거하고 저장
