@@ -469,12 +469,12 @@ def write_detail_header(ws, row):
     return row + HEADER_ROWS
 
 
-def _apply_header_dividers(ws, r0, medium_left_cols, medium_right_cols):
+def _apply_header_dividers(ws, r0, medium_left_cols, medium_right_cols, ncols=22):
     """헤더 3행에도 본문과 동일한 굵은 구획선을 적용하고, 맨 윗행은 구획선
     시작 열부터 끝까지 윗변도 굵게(원본 템플릿의 헤더 상단 강조선)."""
     top_from = min(medium_left_cols) if medium_left_cols else None
     for rr in range(r0, r0 + HEADER_ROWS):
-        for col in range(2, 23):
+        for col in range(2, ncols + 1):
             cell = ws.cell(row=rr, column=col)
             b = cell.border
             left = MEDIUM if col in medium_left_cols else b.left
@@ -687,7 +687,8 @@ def write_summary_header(ws, row):
         _hcell(ws, r0 + 1, col)
         _hcell(ws, r0 + 2, col, label)
 
-    _apply_header_dividers(ws, r0, {SC['done'], SC['not_done']}, {SC['done_pct'], SC['idle_pct']})
+    _apply_header_dividers(ws, r0, {SC['done'], SC['not_done']}, {SC['done_pct'], SC['idle_pct']},
+                            ncols=max(SC.values()))
 
     return row + HEADER_ROWS
 
@@ -769,7 +770,7 @@ def _apply_common_style(ws, ncols, pct_cols, count_cols, medium_left_cols=(), me
     앞/뒤, 미전환 앞, 맨 오른쪽 끝)만 굵은 선(medium)으로 구획을 나눈다.
     header_rows(헤더가 이미 자체 서식을 갖고 있는 행)는 건드리지 않는다."""
     header_rows = set(header_rows)
-    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=2, max_col=1 + ncols):
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=2, max_col=ncols):
         for cell in row:
             if cell.row in header_rows:
                 continue
