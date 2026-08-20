@@ -54,9 +54,10 @@ def copy_values_only(src_ws, dst_wb, sheet_name):
                 mr = merge_anchors.get(cell.row)
                 if (align.horizontal in (None, 'general') and mr is not None
                         and mr.min_col == cell.column):
-                    align = Alignment(horizontal='center', vertical='center',
-                                       wrap_text=align.wrap_text)
-                new_cell.alignment = align.copy()
+                    new_cell.alignment = Alignment(horizontal='center', vertical='center',
+                                                    wrap_text=align.wrap_text)
+                else:
+                    new_cell.alignment = align.copy()
                 new_cell.number_format = cell.number_format
     for coord, dim in src_ws.column_dimensions.items():
         if dim.width:
