@@ -54,10 +54,12 @@ THIN = Side(style='thin')
 MEDIUM = Side(style='medium')
 
 # 원본 템플릿에서 추출한 색상: 전사계/총계=테마accent5(4472C4) tint 0.8,
-# 부문명 강조=순수 노랑, 헤더=테마lt1(흰색) tint -0.05(연회색)
+# 부문명 강조=순수 노랑, 헤더=테마lt1(흰색) tint -0.05(연회색),
+# 비율(%)열 배경=테마accent6(70AD47) tint 0.8
 TOTAL_FILL = PatternFill('solid', fgColor='DAE3F3')
 GROUP_FILL = PatternFill('solid', fgColor='FFFF00')
 HEADER_FILL = PatternFill('solid', fgColor='F2F2F2')
+PCT_FILL = PatternFill('solid', fgColor='E2EFDA')
 HEADER_FONT = Font(name=FONT_NAME, size=11)
 LABEL_FONT = Font(name=FONT_NAME, size=10)
 
@@ -70,6 +72,12 @@ TIERS = [1, 2, 3, 4, 5]
 # 부문별 그룹: 법인사업부문은 사용자 요청으로 제외
 DEPT_ORDER = ['개인사업부문', '전략사업부문', '신사업부문']
 DEPT_SHORT = {'개인사업부문': '개인', '전략사업부문': '전략', '신사업부문': '신사업'}
+# 원본 템플릿: 부문마다 "합계" 행 강조색이 다르다(개인=노랑/전략=초록/신사업=주황)
+DEPT_FILL = {
+    '개인사업부문': PatternFill('solid', fgColor='FFFF00'),
+    '전략사업부문': PatternFill('solid', fgColor='92D050'),
+    '신사업부문': PatternFill('solid', fgColor='FFC000'),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -729,9 +737,10 @@ def build_summary_sheet(wb, sheet_name, detail_sheet_name, months, group_labels,
         row += 1
         for label in group_labels:
             row = write_summary_row(ws, row, label, detail_sheet_name, row_map[month][label])
-        month_end = row - 1
+        # 원본 템플릿: 월 구분행은 그 한 행만 B:C 가로 병합(부문별 행까지 세로로
+        # 이어붙이지 않는다).
         ws.merge_cells(start_row=month_start, start_column=month_col,
-                        end_row=month_end, end_column=month_col)
+                        end_row=month_start, end_column=SC['group'])
         ws.cell(row=month_start, column=month_col).alignment = Alignment(
             horizontal='center', vertical='center')
         if i < len(months) - 1:
@@ -791,10 +800,16 @@ def style_detail_sheet(ws, row_map):
     for month, groups in row_map.items():
         for label, tier_rows in groups.items():
             total_row = tier_rows['합계']
-            rows = [total_row] + [tier_rows[t] for t in TIERS] if label == '전사 계' else [total_row]
-            fill = TOTAL_FILL if label == '전사 계' else GROUP_FILL
-            for r in rows:
-                for c in range(2, 2 + ncols):
+            all_rows = [total_row] + [tier_rows[t] for t in TIERS]
+            fill = TOTAL_FILL if label == '전사 계' else DEPT_FILL.get(label, GROUP_FILL)
+            highlight_rows = all_rows if label == '전사 계' else [total_row]
+            # C열(부문별 라벨 앞칸)은 월 블록 전체에 걸쳐 항상 파란 스파인으로
+            # 칠한다(원본 템플릿: 전사계뿐 아니라 개별 부문 블록의 연차행까지도
+            # C열만은 계속 파란색). 월(B)열은 색을 넣지 않는다(원본 템플릿 그대로).
+            for r in all_rows:
+                ws.cell(row=r, column=DC['group_wide']).fill = TOTAL_FILL
+            for r in highlight_rows:
+                for c in range(DC['group_wide'] + 1, ncols + 1):
                     ws.cell(row=r, column=c).fill = fill
 
     # 원본 템플릿이 실제로 커스텀 폭을 지정한 열만 반영, 나머지는 기본폭 유지
@@ -818,10 +833,18 @@ def style_summary_sheet(ws):
     header_rows = getattr(ws, '_header_rows', set())
     _apply_common_style(ws, ncols, pct_cols, count_cols, medium_left, medium_right, header_rows)
 
+    # 원본 템플릿: 합산보고에는 부문별 강조색이 따로 없고, 비율(%)열만 헤더의
+    # '%' 라벨행부터 데이터 끝까지 연한 초록으로 칠해져 있다(빈 간격행은 제외).
+    header_bottom = max(header_rows) if header_rows else None
     for r in range(1, ws.max_row + 1):
-        gcell = ws.cell(row=r, column=SC['group'])
-        if gcell.value not in (None,):
-            gcell.fill = GROUP_FILL
+        if r in header_rows and r != header_bottom:
+            continue
+        has_value = any(ws.cell(row=r, column=c).value is not None
+                         for c in range(2, ncols + 2))
+        if not has_value:
+            continue
+        for c in pct_cols:
+            ws.cell(row=r, column=c).fill = PCT_FILL
 
     widths = {'B': 3.125, 'H': 5.75, 'I': 9.5, 'J': 5.75, 'L': 5.75, 'M': 8.375,
               'R': 8.0, 'S': 8.75, 'T': 5.75}
