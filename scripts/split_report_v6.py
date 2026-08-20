@@ -35,7 +35,7 @@ def copy_values_only(src_ws, dst_wb, sheet_name):
     # 정렬(가운데맞춤 등)을 'general'로 초기화해버리는 경우가 있어서(작은
     # 샘플에서는 재현되지 않고 실제 11만 행 데이터에서만 관측됨), 값이 있는
     # 병합 대표 셀은 정렬이 비어있으면 가운데맞춤으로 복원한다.
-    merge_anchors = {mr.min_row: mr for mr in src_ws.merged_cells.ranges}
+    merge_anchors = {(mr.min_row, mr.min_col) for mr in src_ws.merged_cells.ranges}
     for row in src_ws.iter_rows():
         for cell in row:
             if cell.value is None:
@@ -51,9 +51,8 @@ def copy_values_only(src_ws, dst_wb, sheet_name):
                 new_cell.fill = cell.fill.copy()
                 new_cell.border = cell.border.copy()
                 align = cell.alignment
-                mr = merge_anchors.get(cell.row)
-                if (align.horizontal in (None, 'general') and mr is not None
-                        and mr.min_col == cell.column):
+                if (align.horizontal in (None, 'general')
+                        and (cell.row, cell.column) in merge_anchors):
                     new_cell.alignment = Alignment(horizontal='center', vertical='center',
                                                     wrap_text=align.wrap_text)
                 else:
