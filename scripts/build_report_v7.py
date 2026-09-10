@@ -51,8 +51,38 @@ DEPT_FILL = {
     '신사업': PatternFill('solid', fgColor='FFC000'),
 }
 HEADER_FONT = Font(name=FONT_NAME, size=11)
+BODY_FONT = Font(name=FONT_NAME, size=11)
+LABEL_FONT = Font(name=FONT_NAME, size=11, bold=True)
 
 DEPTS_SHORT = ['개인', '전략', '신사업']
+
+
+def set_group_label(ws, row, col, value, horizontal='center'):
+    """전사계/부문(개인·전략·신사업) 등 그룹 라벨 셀: 굵게+가운데(수직) 정렬."""
+    cell = ws.cell(row=row, column=col, value=value)
+    cell.font = LABEL_FONT
+    cell.alignment = Alignment(horizontal=horizontal, vertical='center')
+    return cell
+
+
+LABEL_BOX = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
+
+
+def set_label_border(ws, row, cols, top=True, bottom=True):
+    """부문별/연차/월/연도별/상품명 등 라벨 칸(지표 블록 바깥쪽)에도 데이터 행마다
+    표 전체와 이어지는 테두리를 준다(그렇지 않으면 배경색만 있고 선이 없어 보인다).
+    top/bottom=False로 주면 그룹 내부 행 사이의 가로줄을 없앤다."""
+    border = Border(top=THIN if top else None, bottom=THIN if bottom else None, left=THIN, right=THIN)
+    for c in cols:
+        ws.cell(row=row, column=c).border = border
+
+
+def set_value_label(ws, row, col, value):
+    """월/연차/구간 등 값 성격의 라벨 셀: 일반체+가운데(수평/수직) 정렬."""
+    cell = ws.cell(row=row, column=col, value=value)
+    cell.font = BODY_FONT
+    cell.alignment = Alignment(horizontal='center', vertical='center')
+    return cell
 
 # 지표 블록 리프 정의: (오프셋, 라벨, 병합폭(1이면 단일열), 종류)
 # 종류: 'plain'(값만) / 'ratio'(값+바로 다음 열이 %) / 'pct'(비율 표시 전용, ratio가 채움) /
@@ -60,46 +90,62 @@ DEPTS_SHORT = ['개인', '전략', '신사업']
 METRIC_WIDTH = 18
 
 
-def _hcell(ws, r, c, value=None, fill=HEADER_FILL):
+def _hcell(ws, r, c, value=None, fill=HEADER_FILL, border=None):
     cell = ws.cell(row=r, column=c)
     if value is not None:
         cell.value = value
     cell.font = HEADER_FONT
     cell.fill = fill
     cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    cell.border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
+    cell.border = border if border is not None else Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
     return cell
+
+
+# 헤더 3행 블록의 실측(원본 템플릿) 테두리 패턴 - 두 부류로 나뉜다:
+#  Type A(전환대상/전환완료/전환미완료 각각에 곧바로 붙는 %열, 오프셋3·5·7):
+#    위 2행은 완전히 비워두고(내부 선 없음) 라벨행 윗변에만 얇은 선.
+#  Type B(현장활동확인%부터 그 뒤 전환예정·코드5종·현장활동미확인%까지, 오프셋9~17):
+#    2번째 행부터 이미 얇은 윗선이 있어 A보다 한 줄 위에서 선이 시작된다.
+_TYPE_A_TOP = Border(top=THIN, bottom=None, left=None, right=None)
+_TYPE_A_MID = Border(top=None, bottom=None, left=None, right=None)
+_TYPE_A_LABEL = Border(top=THIN, bottom=None, left=THIN, right=None)
+
+_TYPE_B_TOP = Border(top=THIN, bottom=None, left=None, right=None)
+_TYPE_B_MID = Border(top=THIN, bottom=None, left=None, right=None)
+_TYPE_B_LABEL = Border(top=THIN, bottom=None, left=THIN, right=THIN)
+
+_ACT_MERGED_BOTTOM = Border(top=None, bottom=None, left=THIN, right=None)
 
 
 def write_metric_header(ws, r0, col0, target_label='유지계약\nA', pct_header_fill=PCT_HEADER_FILL):
     """3행 지표 헤더(유지계약~현장활동미확인, 폭 18칸)를 col0부터 그린다."""
-    L = get_column_letter
 
-    def full3(col, label):
+    def full3(col, label, right_border=THIN):
         ws.merge_cells(start_row=r0, start_column=col, end_row=r0 + 2, end_column=col)
+        box = Border(top=THIN, bottom=None, left=THIN, right=right_border)
         for rr in range(r0, r0 + 3):
-            _hcell(ws, rr, col)
-        _hcell(ws, r0, col, label)
+            _hcell(ws, rr, col, border=box)
+        ws.cell(row=r0, column=col, value=label)
 
     full3(col0, target_label)
     full3(col0 + 1, '사고有\nB')
-    full3(col0 + 2, '전환대상\nC (A-B)')
-    full3(col0 + 4, '전환완료\nD')
-    full3(col0 + 6, '전환미완료\nE (C-D)')
+    full3(col0 + 2, '전환대상\nC (A-B)', right_border=None)
+    full3(col0 + 4, '전환완료\nD', right_border=None)
+    full3(col0 + 6, '전환미완료\nE (C-D)', right_border=None)
 
     for off in (3, 5, 7):
         col = col0 + off
-        for rr in range(r0, r0 + 2):
-            _hcell(ws, rr, col)
-        _hcell(ws, r0 + 2, col, '%', fill=pct_header_fill)
+        label_border = _TYPE_A_LABEL if off != 7 else Border(top=THIN, bottom=None, left=THIN, right=THIN)
+        _hcell(ws, r0, col, border=_TYPE_A_TOP)
+        _hcell(ws, r0 + 1, col, border=_TYPE_A_MID)
+        _hcell(ws, r0 + 2, col, '%', fill=pct_header_fill, border=label_border)
 
     for off, label in ((8, '현장활동\n확인'), (16, '현장활동\n미확인')):
         col = col0 + off
-        _hcell(ws, r0, col)
+        _hcell(ws, r0, col, border=_TYPE_A_TOP)
         ws.merge_cells(start_row=r0 + 1, start_column=col, end_row=r0 + 2, end_column=col)
-        for rr in (r0 + 1, r0 + 2):
-            _hcell(ws, rr, col)
-        _hcell(ws, r0 + 1, col, label)
+        _hcell(ws, r0 + 1, col, label, border=_TYPE_A_LABEL)
+        _hcell(ws, r0 + 2, col, border=_ACT_MERGED_BOTTOM)
 
     leaves = {
         9: '%', 10: '전환예정', 11: '연락두절', 12: '사고있음',
@@ -107,10 +153,10 @@ def write_metric_header(ws, r0, col0, target_label='유지계약\nA', pct_header
     }
     for off, label in leaves.items():
         col = col0 + off
-        _hcell(ws, r0, col)
-        _hcell(ws, r0 + 1, col)
+        _hcell(ws, r0, col, border=_TYPE_B_TOP)
+        _hcell(ws, r0 + 1, col, border=_TYPE_B_MID)
         fill = pct_header_fill if off in (9, 17) else HEADER_FILL
-        _hcell(ws, r0 + 2, col, label, fill=fill)
+        _hcell(ws, r0 + 2, col, label, fill=fill, border=_TYPE_B_LABEL)
 
     # 구획선(medium): 전환완료(+4) 좌측/전환률(+5) 우측, 미전환(+6) 좌측/전체比(+17) 우측
     medium_left = {col0 + 4, col0 + 6}
@@ -131,13 +177,108 @@ def _metric_fill(ws, row, col0, fill):
         ws.cell(row=row, column=c).fill = fill
 
 
-def _metric_border(ws, row, col0):
+def _metric_border(ws, row, col0, top=True, bottom=True):
+    """top/bottom=False로 주면 그룹 내부 행 사이의 가로줄을 없앤다(그룹 전체를
+    하나의 칸처럼 보이게 하고, 그룹의 맨 위/맨 아래 행에서만 top/bottom=True로
+    호출해 바깥 테두리만 남긴다)."""
     medium_left = {col0 + 4, col0 + 6}
     medium_right = {col0 + 5, col0 + 17}
     for c in range(col0, col0 + METRIC_WIDTH):
         left = MEDIUM if c in medium_left else THIN
         right = MEDIUM if c in medium_right else THIN
-        ws.cell(row=row, column=c).border = Border(top=THIN, bottom=THIN, left=left, right=right)
+        ws.cell(row=row, column=c).border = Border(
+            top=THIN if top else None, bottom=THIN if bottom else None, left=left, right=right)
+
+
+# ---------------------------------------------------------------------------
+# 체결기간별_부문별 전용 지표 블록(폭 20칸): 전환완료(D) 뒤에 '최대전환완료'
+# 2칸(값+%)이 추가로 끼어든다 - 최대전환년수 이상 도달 + 완료(더 이상 다음
+# 연차 대상에 남지 않는 건)만 별도로 보여주기 위함.
+# ---------------------------------------------------------------------------
+METRIC_WIDTH_PERIOD = 20
+
+
+def write_metric_header_period(ws, r0, col0, target_label='대상계약\nA', pct_header_fill=PCT_HEADER_FILL):
+    def full3(col, label, right_border=THIN):
+        ws.merge_cells(start_row=r0, start_column=col, end_row=r0 + 2, end_column=col)
+        box = Border(top=THIN, bottom=None, left=THIN, right=right_border)
+        for rr in range(r0, r0 + 3):
+            _hcell(ws, rr, col, border=box)
+        ws.cell(row=r0, column=col, value=label)
+
+    full3(col0, target_label)
+    full3(col0 + 1, '사고有\nB')
+    full3(col0 + 2, '전환대상\nC (A-B)', right_border=None)
+    full3(col0 + 4, '전환완료\nD', right_border=None)
+    full3(col0 + 8, '전환미완료\nE (C-D)', right_border=None)
+
+    for off in (3, 5, 9):
+        col = col0 + off
+        label_border = _TYPE_A_LABEL if off != 9 else Border(top=THIN, bottom=None, left=THIN, right=THIN)
+        _hcell(ws, r0, col, border=_TYPE_A_TOP)
+        _hcell(ws, r0 + 1, col, border=_TYPE_A_MID)
+        _hcell(ws, r0 + 2, col, '%', fill=pct_header_fill, border=label_border)
+
+    for off, label in ((6, '최대\n전환완료'), (10, '현장활동\n확인'), (18, '현장활동\n미확인')):
+        col = col0 + off
+        _hcell(ws, r0, col, border=_TYPE_A_TOP)
+        ws.merge_cells(start_row=r0 + 1, start_column=col, end_row=r0 + 2, end_column=col)
+        _hcell(ws, r0 + 1, col, label, border=_TYPE_A_LABEL)
+        _hcell(ws, r0 + 2, col, border=_ACT_MERGED_BOTTOM)
+
+    leaves = {
+        7: '%', 11: '%', 12: '전환예정', 13: '연락두절', 14: '사고있음',
+        15: '고객거부', 16: '압류계약', 17: 'ARS거부', 19: '%',
+    }
+    for off, label in leaves.items():
+        col = col0 + off
+        _hcell(ws, r0, col, border=_TYPE_B_TOP)
+        _hcell(ws, r0 + 1, col, border=_TYPE_B_MID)
+        fill = pct_header_fill if off in (7, 11, 19) else HEADER_FILL
+        _hcell(ws, r0 + 2, col, label, fill=fill, border=_TYPE_B_LABEL)
+
+    medium_left = {col0 + 4, col0 + 8}
+    medium_right = {col0 + 7, col0 + 19}
+    top_from = col0 + 4
+    for rr in range(r0, r0 + 3):
+        for c in range(col0, col0 + METRIC_WIDTH_PERIOD):
+            cell = ws.cell(row=rr, column=c)
+            b = cell.border
+            left = MEDIUM if c in medium_left else b.left
+            right = MEDIUM if c in medium_right else b.right
+            top = MEDIUM if (rr == r0 and c >= top_from) else b.top
+            cell.border = Border(top=top, bottom=b.bottom, left=left, right=right)
+
+    # 최대전환완료(신규 삽입) 구획을 굵은 선으로 한 번 더 강조: M/N열의 위쪽
+    # 빈칸(r0+1)과 라벨행 경계를 굵게 바꾼다.
+    for off in (6, 7):
+        col = col0 + off
+        cell = ws.cell(row=r0 + 1, column=col)
+        b = cell.border
+        cell.border = Border(top=MEDIUM, bottom=b.bottom, left=b.left, right=b.right)
+
+    # M열(최대전환완료) 라벨행의 왼쪽 테두리도 굵게(7행 빈칸은 L-M 사이에
+    # 세로선이 없어야 하므로 그대로 두고, 8~9행 라벨 부분만 굵게 바꾼다).
+    m_col = col0 + 6
+    for rr in (r0 + 1, r0 + 2):
+        cell = ws.cell(row=rr, column=m_col)
+        b = cell.border
+        cell.border = Border(top=b.top, bottom=b.bottom, left=MEDIUM, right=b.right)
+
+
+def _metric_fill_period(ws, row, col0, fill):
+    for c in range(col0, col0 + METRIC_WIDTH_PERIOD):
+        ws.cell(row=row, column=c).fill = fill
+
+
+def _metric_border_period(ws, row, col0, top=True, bottom=True):
+    medium_left = {col0 + 4, col0 + 6, col0 + 8}
+    medium_right = {col0 + 5, col0 + 7, col0 + 19}
+    for c in range(col0, col0 + METRIC_WIDTH_PERIOD):
+        left = MEDIUM if c in medium_left else THIN
+        right = MEDIUM if c in medium_right else THIN
+        ws.cell(row=row, column=c).border = Border(
+            top=THIN if top else None, bottom=THIN if bottom else None, left=left, right=right)
         ws.cell(row=row, column=c).font = Font(name=FONT_NAME, size=10)
 
 

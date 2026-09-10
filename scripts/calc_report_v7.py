@@ -170,9 +170,41 @@ def _new_bucket():
         'raw': 0, 'matured_excl': 0,
         'acc_t1': 0, 'acc_t1_sub': 0, 'acc_t3': 0, 'acc_t3_sub': 0,
         'done': 0,
-        'plan_raw': 0, 'plan_sub': defaultdict(int),
-        'code_direct': defaultdict(int), 'code_c2': defaultdict(int), 'code_c3': defaultdict(int),
+        'plan': 0, 'codes': defaultdict(int),
     }
+
+
+def cascade_counts(tier, v_this, v_prev, as_flag, yc, code):
+    """한 행이 특정 연차(tier)에 대해 기여하는 사고유/전환예정/코드별 판정을
+    한 곳에서 계산한다(표준 시트와 체결기간별 양쪽에서 재사용).
+    반환: (사고유해당여부, matured제외여부, 전환예정/코드해당여부, 어떤코드인지)"""
+    accident_hit = False
+    accident_matured_excl = False
+    if v_this == '0':
+        accident_hit = True
+        accident_matured_excl = as_flag and not yc
+    elif tier > 1 and v_this == ' ' and v_prev == '0':
+        accident_hit = True
+        accident_matured_excl = as_flag and yc
+
+    matured_excl_target = tier > 1 and v_this in ('1', ' ') and as_flag and yc
+
+    # 코드별(연락두절/사고있음/고객거부/압류계약/ARS거부): 실제 현장에서 코드가
+    # 기록됐다는 것 자체가 활동 확인 증거이므로, v_this가 0이 아니면(=1 또는 공란)
+    # 카운트. 단 2연차부터는 공란이면서 직전 연차가 사고(0)였던 캐스케이드는 이미
+    # 사고유로 처리됐으니 제외.
+    # 전환예정(코드 없이 그냥 대기): 아직 어떤 활동 기록도 없는 공란 상태는
+    # "대기 중"으로 볼 근거가 없으므로, v_this=1(정상 기록 존재)인 경우만 카운트.
+    code_hit = False
+    if v_this in ('1', ' ') and not as_flag:
+        excluded = tier > 1 and v_this == ' ' and v_prev == '0'
+        code_hit = not excluded
+    plan_hit = v_this == '1' and not as_flag
+
+    has_code = code in CODE_STRS
+    plan_or_code_hit = code_hit if has_code else plan_hit
+
+    return accident_hit, accident_matured_excl, matured_excl_target, plan_or_code_hit
 
 
 class TierAccum:
@@ -184,28 +216,25 @@ class TierAccum:
     def add(self, key, tier, v_this, v_prev, as_flag, yc, code):
         b = self.data[key][tier]
         b['raw'] += 1
-        if tier > 1:
-            if v_this in ('1', ' ') and as_flag and yc:
-                b['matured_excl'] += 1
+        accident_hit, accident_matured_excl, matured_excl_target, plan_or_code_hit = \
+            cascade_counts(tier, v_this, v_prev, as_flag, yc, code)
+        if matured_excl_target:
+            b['matured_excl'] += 1
         if v_this == '0':
             b['acc_t1'] += 1
-            if as_flag and not yc:
+            if accident_matured_excl:
                 b['acc_t1_sub'] += 1
-        if tier > 1 and v_this == ' ' and v_prev == '0':
+        elif tier > 1 and v_this == ' ' and v_prev == '0':
             b['acc_t3'] += 1
-            if as_flag and yc:
+            if accident_matured_excl:
                 b['acc_t3_sub'] += 1
         if as_flag and not yc:
             b['done'] += 1
-        if v_this == '1' and not as_flag:
-            b['plan_raw'] += 1
+        if plan_or_code_hit:
             if code in CODE_STRS:
-                b['plan_sub'][code] += 1
-            b['code_direct'][code] += 1
-        elif tier > 1 and v_this == ' ' and not as_flag:
-            b['code_c2'][code] += 1
-            if v_prev == '0':
-                b['code_c3'][code] += 1
+                b['codes'][code] += 1
+            else:
+                b['plan'] += 1
 
     def finalize_bucket(self, b):
         target = b['raw'] - b['matured_excl']
@@ -213,13 +242,8 @@ class TierAccum:
         conv_target = target - accident
         done = b['done']
         not_done = conv_target - done
-        plan = b['plan_raw'] - sum(b['plan_sub'].get(cs, 0) for cs in CODE_STRS)
-        codes = {}
-        for cs in CODE_STRS:
-            direct = b['code_direct'].get(cs, 0)
-            c2 = b['code_c2'].get(cs, 0)
-            c3 = b['code_c3'].get(cs, 0)
-            codes[cs] = direct + c2 - c3
+        plan = b['plan']
+        codes = {cs: b['codes'].get(cs, 0) for cs in CODE_STRS}
         idle = not_done - (plan + sum(codes.values()))
         return {
             'target': target, 'accident': accident, 'conv_target': conv_target,
@@ -262,15 +286,25 @@ def sum_metrics(metric_list):
 # 여러 연차에 동시 기여)
 # ---------------------------------------------------------------------------
 
+def _new_period_bucket():
+    return {'target': 0, 'accident': 0, 'done': 0, 'max_done': 0, 'plan': 0, 'codes': defaultdict(int),
+            'not_done_origin': defaultdict(int)}
+
+
 class PeriodAccum:
+    """최대전환년수는 '몇 년 뒤에 추적을 끊는다'는 컷오프가 아니라 '총 몇 단계의
+    전환목표가 있는가'일 뿐이다. 한 계약의 추적을 실제로 끊는 사유는 (1) 사고
+    발생, (2) 최대전환년수 이상 도달한 연차에서 그 연차 목표플랜과 현재플랜이
+    일치(진짜 매큐어+완료) 두 가지뿐이다. 미전환건은 최대전환년수를 넘겨도 실제
+    경과연수가 허용하는 한 계속 대상에 남는다."""
+
     def __init__(self):
-        # data[dept][period_key][tier] = [target, accident, done]  (전환대상=target-accident)
-        self.data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: [0, 0, 0])))
+        self.data = defaultdict(lambda: defaultdict(lambda: defaultdict(_new_period_bucket)))
         self.reach = defaultdict(lambda: defaultdict(set))  # dept -> period_key -> {도달한 연차...}
 
-    def add(self, dept, period_key, elapsed, seq_row_plan, current_plan, maxinfo, vlist):
+    def add(self, dept, period_key, elapsed, seq_row_plan, current_plan, maxinfo, vlist, code):
         max_year, _final_target = maxinfo if maxinfo else (None, None)
-        max_reach = elapsed if max_year is None else min(elapsed, max_year)
+        max_reach = min(elapsed, 5)
         if max_reach < 1:
             return
         acc_tier = None
@@ -278,29 +312,54 @@ class PeriodAccum:
             if vlist[i] == '0':
                 acc_tier = i + 1
                 break
+        k = seq_row_plan
         for n in range(1, max_reach + 1):
             if acc_tier is not None and acc_tier < n:
                 break  # 이전 연차에 사고 -> 이후 연차 대상에서 완전히 빠짐
             bucket = self.data[dept][period_key][n]
-            bucket[0] += 1  # target(=대상계약A)
+            bucket['target'] += 1
             self.reach[dept][period_key].add(n)
             if acc_tier == n:
-                bucket[1] += 1  # accident(사고有B)
-            else:
-                k = seq_row_plan
-                if k >= n:
-                    bucket[2] += 1  # done(전환완료D)
+                bucket['accident'] += 1
+                continue
+            as_flag_n = k >= n
+            matured_n = max_year is not None and max_year <= n
+            if as_flag_n:
+                bucket['done'] += 1
+                if matured_n:
+                    bucket['max_done'] += 1
+                    break  # 최대전환년수 이상 도달 + 완료 = 더 이상 추적할 목표가 없음
+                continue
+            # 이 계약이 처음 뒤처지기 시작한 연차(기원 연차) = k+1. k는 n과 무관하게
+            # 고정값이라 한 번 뒤처지면(k<n) 이후 모든 연차에서도 계속 뒤처진 것으로
+            # 잡히므로, 미완료로 잡히는 매 연차마다 기원 연차는 항상 k+1로 동일하다.
+            bucket['not_done_origin'][k + 1] += 1
+            v_this = vlist[n - 1]
+            v_prev = vlist[n - 2] if n > 1 else None
+            _, _, _, plan_or_code_hit = cascade_counts(n, v_this, v_prev, as_flag_n, False, code)
+            if plan_or_code_hit:
+                if code in CODE_STRS:
+                    bucket['codes'][code] += 1
+                else:
+                    bucket['plan'] += 1
 
     def rows_for(self, dept, period_key):
         """해당 부문/구간에서 실제로 존재하는 연차 목록(오름차순)."""
         return sorted(self.reach[dept][period_key])
 
     def get(self, dept, period_key, tier):
-        target, accident, done = self.data[dept][period_key][tier]
+        b = self.data[dept][period_key][tier]
+        target, accident, done = b['target'], b['accident'], b['done']
         conv_target = target - accident
         not_done = conv_target - done
+        max_done = b['max_done']
+        plan = b['plan']
+        codes = {cs: b['codes'].get(cs, 0) for cs in CODE_STRS}
+        idle = not_done - (plan + sum(codes.values()))
+        not_done_origin = {j: b['not_done_origin'].get(j, 0) for j in range(1, tier + 1)}
         return {'target': target, 'accident': accident, 'conv_target': conv_target,
-                'done': done, 'not_done': not_done}
+                'done': done, 'max_done': max_done, 'not_done': not_done,
+                'plan': plan, 'codes': codes, 'idle': idle, 'not_done_origin': not_done_origin}
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +419,7 @@ def compute_all(data_paths, mapping_path, progress_every=100000):
                 _plabel, pkey = period_of(ym)
                 if pkey is not None:
                     k = completed_tier(seq, initial_plan, current_plan)
-                    period_acc.add(dept, pkey, tier, k, current_plan, mm, vlist)
+                    period_acc.add(dept, pkey, tier, k, current_plan, mm, vlist, code)
 
     print(f'총 처리 행수: {n:,}')
     return {
