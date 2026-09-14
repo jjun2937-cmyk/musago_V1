@@ -126,7 +126,11 @@ class Cols:
         idx = header_index(header)
         self.month = idx['계약체결월']
         self.dept = idx['수금부문명']
-        self.product = idx['상품명']
+        # 상품별 시트는 요율일련번호(같은 상품코드 안에서 요율만 다른 변형)를
+        # 구분하지 않고 상품코드 단위로 합산한다 - 상품명은 상품코드+요율일련번호를
+        # 이어붙인 값이라(예: 코드 31038 + 일련번호 3 -> 상품명 310383) 상품코드
+        # 자체가 이미 그 변형들의 공통 표시값이 된다.
+        self.product = idx['상품코드']
         self.tier = idx['경과년수']
         self.start = idx.get('보험기간시작일자')
         self.v = [idx[f'전환사고구분값{i}'] for i in range(1, 6)]
@@ -207,6 +211,46 @@ def cascade_counts(tier, v_this, v_prev, as_flag, yc, code):
     return accident_hit, accident_matured_excl, matured_excl_target, plan_or_code_hit
 
 
+def _apply_row(b, tier, v_this, v_prev, as_flag, yc, code):
+    """bucket(dict) 하나에 원시 행 하나를 누적한다. tier는 '이 판정에 쓸 연차'
+    (실제 경과년수일 수도, 과거 특정 연도 기준으로 역산한 연차일 수도 있음)."""
+    b['raw'] += 1
+    accident_hit, accident_matured_excl, matured_excl_target, plan_or_code_hit = \
+        cascade_counts(tier, v_this, v_prev, as_flag, yc, code)
+    if matured_excl_target:
+        b['matured_excl'] += 1
+    if v_this == '0':
+        b['acc_t1'] += 1
+        if accident_matured_excl:
+            b['acc_t1_sub'] += 1
+    elif tier > 1 and v_this == ' ' and v_prev == '0':
+        b['acc_t3'] += 1
+        if accident_matured_excl:
+            b['acc_t3_sub'] += 1
+    if as_flag and not yc:
+        b['done'] += 1
+    if plan_or_code_hit:
+        if code in CODE_STRS:
+            b['codes'][code] += 1
+        else:
+            b['plan'] += 1
+
+
+def finalize_bucket(b):
+    target = b['raw'] - b['matured_excl']
+    accident = (b['acc_t1'] - b['acc_t1_sub']) + (b['acc_t3'] - b['acc_t3_sub'])
+    conv_target = target - accident
+    done = b['done']
+    not_done = conv_target - done
+    plan = b['plan']
+    codes = {cs: b['codes'].get(cs, 0) for cs in CODE_STRS}
+    idle = not_done - (plan + sum(codes.values()))
+    return {
+        'target': target, 'accident': accident, 'conv_target': conv_target,
+        'done': done, 'not_done': not_done, 'plan': plan, 'codes': codes, 'idle': idle,
+    }
+
+
 class TierAccum:
     """key(예: (month,dept) 또는 dept 또는 (product,dept)) x tier(1~5) 별 원시 집계."""
 
@@ -214,48 +258,40 @@ class TierAccum:
         self.data = defaultdict(lambda: defaultdict(_new_bucket))
 
     def add(self, key, tier, v_this, v_prev, as_flag, yc, code):
-        b = self.data[key][tier]
-        b['raw'] += 1
-        accident_hit, accident_matured_excl, matured_excl_target, plan_or_code_hit = \
-            cascade_counts(tier, v_this, v_prev, as_flag, yc, code)
-        if matured_excl_target:
-            b['matured_excl'] += 1
-        if v_this == '0':
-            b['acc_t1'] += 1
-            if accident_matured_excl:
-                b['acc_t1_sub'] += 1
-        elif tier > 1 and v_this == ' ' and v_prev == '0':
-            b['acc_t3'] += 1
-            if accident_matured_excl:
-                b['acc_t3_sub'] += 1
-        if as_flag and not yc:
-            b['done'] += 1
-        if plan_or_code_hit:
-            if code in CODE_STRS:
-                b['codes'][code] += 1
-            else:
-                b['plan'] += 1
+        _apply_row(self.data[key][tier], tier, v_this, v_prev, as_flag, yc, code)
 
     def finalize_bucket(self, b):
-        target = b['raw'] - b['matured_excl']
-        accident = (b['acc_t1'] - b['acc_t1_sub']) + (b['acc_t3'] - b['acc_t3_sub'])
-        conv_target = target - accident
-        done = b['done']
-        not_done = conv_target - done
-        plan = b['plan']
-        codes = {cs: b['codes'].get(cs, 0) for cs in CODE_STRS}
-        idle = not_done - (plan + sum(codes.values()))
-        return {
-            'target': target, 'accident': accident, 'conv_target': conv_target,
-            'done': done, 'not_done': not_done, 'plan': plan, 'codes': codes, 'idle': idle,
-        }
+        return finalize_bucket(b)
 
     def finalize(self, key):
         out = {}
         for tier in TIERS:
             b = self.data.get(key, {}).get(tier)
-            out[tier] = self.finalize_bucket(b) if b else self.finalize_bucket(_new_bucket())
+            out[tier] = finalize_bucket(b) if b else finalize_bucket(_new_bucket())
         return out
+
+    def keys(self):
+        return list(self.data.keys())
+
+
+class YearMonthAccum:
+    """(target_year, month, dept) 키별 원시 집계 - "월별_부문별_new" 전용.
+
+    TierAccum과 달리 tier(경과년수)를 그대로 쓰지 않고, 계약별로 "그 target_year
+    시점엔 실제로 몇 연차였는지"를 역산한 연차(e)를 기준으로 v값/목표플랜을 다시
+    판정해서 누적한다. 그래서 예를 들어 지금(오늘 기준) 4년차인 계약도, 2025년
+    기준으로는 그 계약이 실제로 3년차였던 시점의 v값/목표플랜으로 판정되어
+    2025년 버킷에 들어간다(현재 4년차 값을 그대로 재사용하지 않음)."""
+
+    def __init__(self):
+        self.data = defaultdict(_new_bucket)
+
+    def add(self, key, e, v_this, v_prev, as_flag, yc, code):
+        _apply_row(self.data[key], e, v_this, v_prev, as_flag, yc, code)
+
+    def finalize(self, key):
+        b = self.data.get(key)
+        return finalize_bucket(b) if b else finalize_bucket(_new_bucket())
 
     def keys(self):
         return list(self.data.keys())
@@ -288,7 +324,9 @@ def sum_metrics(metric_list):
 
 def _new_period_bucket():
     return {'target': 0, 'accident': 0, 'done': 0, 'max_done': 0, 'plan': 0, 'codes': defaultdict(int),
-            'not_done_origin': defaultdict(int)}
+            'not_done_origin': defaultdict(int),
+            'final_accident': 0, 'final_done': 0, 'final_not_done': 0,
+            'final_plan': 0, 'final_codes': defaultdict(int)}
 
 
 class PeriodAccum:
@@ -321,14 +359,22 @@ class PeriodAccum:
             self.reach[dept][period_key].add(n)
             if acc_tier == n:
                 bucket['accident'] += 1
+                # 사고는 계약당 한 번만(정확히 그 연차에서) 잡히고 이 조건 자체가
+                # 이 계약의 마지막 기여 지점이 되므로(다음 연차부터는 위 break로
+                # 완전히 빠짐) 별도 처리 없이 그대로 '최종' 사고 건수로 쓸 수 있다.
+                bucket['final_accident'] += 1
                 continue
             as_flag_n = k >= n
             matured_n = max_year is not None and max_year <= n
+            is_final_n = n == max_reach
             if as_flag_n:
                 bucket['done'] += 1
                 if matured_n:
                     bucket['max_done'] += 1
+                    bucket['final_done'] += 1
                     break  # 최대전환년수 이상 도달 + 완료 = 더 이상 추적할 목표가 없음
+                if is_final_n:
+                    bucket['final_done'] += 1
                 continue
             # 이 계약이 처음 뒤처지기 시작한 연차(기원 연차) = k+1. k는 n과 무관하게
             # 고정값이라 한 번 뒤처지면(k<n) 이후 모든 연차에서도 계속 뒤처진 것으로
@@ -342,6 +388,18 @@ class PeriodAccum:
                     bucket['codes'][code] += 1
                 else:
                     bucket['plan'] += 1
+            # '최종(final_*)' 계열은 이 계약이 현재 데이터 기준으로 도달한 마지막
+            # 연차(max_reach)에서 딱 한 번만 집계한다 - target/done/not_done은
+            # 위에서 보듯 살아있는 동안 매 연차 다시 잡히는 누적 구조라 그대로
+            # 합산하면 중복 계산되지만, final_*은 계약당 정확히 한 번만 잡혀서
+            # 여러 연차(tier)에 걸쳐 합산해도 실제 계약 수와 일치한다.
+            if is_final_n:
+                bucket['final_not_done'] += 1
+                if plan_or_code_hit:
+                    if code in CODE_STRS:
+                        bucket['final_codes'][code] += 1
+                    else:
+                        bucket['final_plan'] += 1
 
     def rows_for(self, dept, period_key):
         """해당 부문/구간에서 실제로 존재하는 연차 목록(오름차순)."""
@@ -357,16 +415,26 @@ class PeriodAccum:
         codes = {cs: b['codes'].get(cs, 0) for cs in CODE_STRS}
         idle = not_done - (plan + sum(codes.values()))
         not_done_origin = {j: b['not_done_origin'].get(j, 0) for j in range(1, tier + 1)}
+        final_codes = {cs: b['final_codes'].get(cs, 0) for cs in CODE_STRS}
         return {'target': target, 'accident': accident, 'conv_target': conv_target,
                 'done': done, 'max_done': max_done, 'not_done': not_done,
-                'plan': plan, 'codes': codes, 'idle': idle, 'not_done_origin': not_done_origin}
+                'plan': plan, 'codes': codes, 'idle': idle, 'not_done_origin': not_done_origin,
+                'final_accident': b['final_accident'], 'final_done': b['final_done'],
+                'final_not_done': b['final_not_done'], 'final_plan': b['final_plan'],
+                'final_codes': final_codes}
 
 
 # ---------------------------------------------------------------------------
 # 메인 계산 루프: 파일들을 한 번 순회하며 필요한 모든 누적기를 채운다.
 # ---------------------------------------------------------------------------
 
-def compute_all(data_paths, mapping_path, progress_every=100000):
+def compute_all(data_paths, mapping_path, progress_every=100000,
+                 new_sheet_years=(2025, 2026), reference_year=2026, current_month=9):
+    """new_sheet_years/reference_year/current_month: "월별_부문별_new" 시트 전용
+    (year_month_new 결과). reference_year/current_month는 이 데이터를 만든
+    "오늘"에 해당하는 연/월 - 계약은 자기 계약월에 매년 생일이 와야 다음 연차로
+    넘어가므로, 그 달이 current_month 이전/이후인지에 따라 지금 기록된 경과년수가
+    실제로 몇 년도에 갱신된 것인지가 달라진다(아래 vintage_year 계산 참고)."""
     lookup, maxmap, seq = load_mapping(mapping_path)
     cols = get_cols(data_paths[0])
 
@@ -374,6 +442,7 @@ def compute_all(data_paths, mapping_path, progress_every=100000):
     all_dept = TierAccum()        # key=dept (전체 기간 합산)
     product_dept = TierAccum()    # key=(product,dept)
     period_acc = PeriodAccum()
+    year_month_new = YearMonthAccum()  # key=(target_year,month,dept) - 월별_부문별_new 전용
 
     months_seen = set()
     products_seen = set()
@@ -412,6 +481,27 @@ def compute_all(data_paths, mapping_path, progress_every=100000):
         all_dept.add(dept, tier, v_this, v_prev, as_flag, yc, code)
         product_dept.add((product, dept), tier, v_this, v_prev, as_flag, yc, code)
 
+        # 월별_부문별_new: 계약체결월 기준 생일이 현재월 이전/이후인지에 따라,
+        # 지금 기록된 tier(경과년수)가 실제로 갱신된 연도(vintage + tier)가
+        # reference_year(생일이 이미 지났으면) 또는 그 전해(아직 안 지났으면)이다.
+        # 여기서 역산한 vintage_year를 기준으로, 목표연도(Y)마다 "그때는 몇
+        # 연차였는지(e)"를 다시 구해 그 연차 기준 v값/목표플랜으로 재판정한다.
+        m_int = int(month) if str(month).isdigit() else None
+        if m_int is not None:
+            offset = 1 if m_int > current_month else 0
+            vintage_year = reference_year - tier - offset
+            for target_year in new_sheet_years:
+                e = target_year - vintage_year
+                if e < 1:
+                    continue  # 그 계약은 target_year 시점엔 아직 존재하지 않았음
+                e = min(e, tier)  # target_year가 미래라 아직 도달 못한 경우 현재까지의 값으로 대체
+                v_this_e = vlist[e - 1]
+                v_prev_e = vlist[e - 2] if e > 1 else None
+                target_plan_e = elapsed_target(lookup, maxmap, initial_plan, e)
+                as_flag_e = (target_plan_e is not None and current_plan == target_plan_e)
+                yc_e = (mm is not None and mm[0] < e)
+                year_month_new.add((target_year, month, dept), e, v_this_e, v_prev_e, as_flag_e, yc_e, code)
+
         if cols.start is not None:
             start = row[cols.start]
             if start:
@@ -424,7 +514,7 @@ def compute_all(data_paths, mapping_path, progress_every=100000):
     print(f'총 처리 행수: {n:,}')
     return {
         'month_dept': month_dept, 'all_dept': all_dept, 'product_dept': product_dept,
-        'period_acc': period_acc,
+        'period_acc': period_acc, 'year_month_new': year_month_new,
         'months': sorted(months_seen, key=lambda m: int(m)),
         'products': sorted(products_seen),
     }

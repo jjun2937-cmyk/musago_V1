@@ -9,7 +9,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import openpyxl
-from openpyxl.styles import Alignment, Border, Side, Font
+from openpyxl.styles import Alignment, Border, Side, Font, PatternFill
+
+NO_FILL = PatternFill(fill_type=None)
 
 THIN_SIDE = Side(style='thin')
 
@@ -328,6 +330,215 @@ def _agg_all_tiers(metrics_by_tier):
 
 
 # ---------------------------------------------------------------------------
+# 2.5) 월별_부문별_new (달력연도 기준 시계열: calc.compute_all()이 계약별로
+#      각 연도 시점 실제 연차를 역산해서 그 연차 기준으로 이미 재판정해 둔
+#      result['year_month_new']를 부문/월 합산만 해서 채운다.)
+# ---------------------------------------------------------------------------
+
+def _agg_sum(parts):
+    """이미 계산된(같은 형태의) 여러 집계 dict를 그대로 다시 더한다(연간 누계용).
+    None(그 달엔 데이터 없음)은 건너뛴다."""
+    parts = [p for p in parts if p is not None]
+    if not parts:
+        return None
+    target = sum(p['target'] for p in parts)
+    accident = sum(p['accident'] for p in parts)
+    done = sum(p['done'] for p in parts)
+    plan = sum(p['plan'] for p in parts)
+    codes = {cs: sum(p['codes'][cs] for p in parts) for cs in CODE_STRS}
+    conv_target = target - accident
+    not_done = conv_target - done
+    idle = not_done - (plan + sum(codes.values()))
+    return {'target': target, 'accident': accident, 'conv_target': conv_target,
+            'done': done, 'not_done': not_done, 'plan': plan, 'codes': codes, 'idle': idle}
+
+
+def write_metric_values_transposed(ws, col, row0, m):
+    """write_metric_values()와 같은 18개 지표를, 가로(열) 한 줄이 아니라 세로
+    (row0부터 아래로 18행)로 채운다. m이 None이면(그 시점엔 데이터가 없음) 전부
+    빈 칸으로 남긴다."""
+    THIN = layout.THIN
+
+    def setv(off, value, is_pct=False):
+        cell = ws.cell(row=row0 + off, column=col)
+        if value is not None:
+            cell.value = value
+        cell.number_format = RATIO_FMT if is_pct else COUNT_FMT
+        cell.font = BODY_FONT
+        cell.alignment = Alignment(horizontal='right', vertical='center')
+        cell.border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
+
+    if m is None:
+        for off in range(18):
+            setv(off, None, off in (3, 5, 7, 9, 17))
+        return
+
+    target, accident, conv_target = m['target'], m['accident'], m['conv_target']
+    done, not_done, plan, idle = m['done'], m['not_done'], m['plan'], m['idle']
+    codes = m['codes']
+    act_sum = plan + sum(codes.values())
+
+    setv(0, target)
+    setv(1, accident)
+    setv(2, conv_target)
+    setv(3, _ratio(conv_target, target), True)
+    setv(4, done)
+    setv(5, _ratio(done, conv_target), True)
+    setv(6, not_done)
+    setv(7, _ratio(not_done, conv_target), True)
+    setv(8, act_sum)
+    setv(9, _ratio(act_sum, conv_target), True)
+    setv(10, plan)
+    for i, (_cn, cs) in enumerate(CODE_MAP):
+        setv(11 + i, codes.get(cs, 0))
+    setv(16, idle)
+    setv(17, _ratio(idle, conv_target), True)
+
+
+def build_month_dept_new(wb, months, year_month_acc, years):
+    """years: 왼쪽부터 표시할 연도 목록(예: [2025, 2026], 나중에 2024/2027 등을
+    앞뒤에 추가하면 자동으로 확장됨). year_month_acc: calc.compute_all()의
+    result['year_month_new'] - 계약별로 각 연도 시점 실제 연차를 역산해서 그
+    연차 기준 v값/목표플랜으로 이미 다시 판정해 둔 (연도,월,부문) 집계이므로,
+    여기서는 그대로 부문 합산/월 합산만 하면 된다."""
+    ws = wb.create_sheet('월별_부문별_new')
+    ws.sheet_view.showGridLines = False
+
+    col_label = 2  # B (B:E 4칸)
+    n_label_cols = 4
+    row0 = 5       # 유지계약(A) 행
+    n_metric_rows = 18
+    cols_per_year = 16  # 1~12월 + 누계 + 부문(개인/전략/신사업)
+
+    hdr_r0 = 2
+    ws.merge_cells(start_row=hdr_r0, start_column=col_label, end_row=hdr_r0 + 2, end_column=col_label + n_label_cols - 1)
+    for rr in range(hdr_r0, hdr_r0 + 3):
+        for c in range(col_label, col_label + n_label_cols):
+            _hcell(ws, rr, c)
+    _hcell(ws, hdr_r0, col_label, '구분')
+
+    col_B, col_C, col_D, col_E = col_label, col_label + 1, col_label + 2, col_label + 3
+
+    label_rows = {
+        row0 + 0: ('유지계약 A', col_B, col_E),
+        row0 + 1: ('사고有 B', col_B, col_E),
+        row0 + 2: ('전환대상 C (A-B)', col_B, col_E),
+        row0 + 4: ('전환완료 D', col_B, col_E),
+        row0 + 6: ('전환미완료 E (C-D)', col_B, col_E),
+        row0 + 8: ('현장활동 확인', col_C, col_E),
+        row0 + 16: ('현장활동 미확인', col_C, col_E),
+    }
+    pct_only_rows = {row0 + 3, row0 + 5, row0 + 7, row0 + 9, row0 + 17}
+    leaf_labels = {
+        row0 + 10: '전환예정', row0 + 11: '연락두절', row0 + 12: '사고있음',
+        row0 + 13: '고객거부', row0 + 14: '압류계약', row0 + 15: 'ARS거부',
+    }
+    def _b(spec):
+        THIN = layout.THIN
+        s = lambda v: THIN if v else None
+        return Border(top=s(spec[0]), bottom=s(spec[1]), left=s(spec[2]), right=s(spec[3]))
+
+    # (B, C, D, E) 열 테두리 - 원본 템플릿에서 셀 단위로 그대로 옮긴 값(1=THIN, 0=없음).
+    label_borders = {
+        row0 + 0: ((1, 1, 1, 1), (1, 1, 0, 0), (1, 1, 0, 0), (1, 1, 0, 1)),
+        row0 + 1: ((1, 1, 1, 1), (1, 1, 0, 0), (1, 1, 0, 0), (1, 1, 0, 1)),
+        row0 + 2: ((1, 0, 1, 1), (1, 0, 0, 0), (1, 0, 0, 0), (1, 0, 0, 1)),
+        row0 + 3: ((0, 1, 1, 0), (0, 1, 0, 0), (0, 1, 0, 0), (1, 1, 1, 1)),
+        row0 + 4: ((1, 0, 1, 1), (1, 0, 0, 0), (1, 0, 0, 0), (1, 0, 0, 1)),
+        row0 + 5: ((0, 1, 1, 0), (0, 1, 0, 0), (0, 1, 0, 0), (1, 1, 1, 1)),
+        row0 + 6: ((0, 0, 1, 1), (0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 1)),
+        row0 + 7: ((0, 0, 1, 0), (0, 0, 0, 0), (0, 0, 0, 0), (1, 0, 1, 1)),
+        row0 + 8: ((0, 0, 1, 0), (1, 0, 1, 1), (1, 0, 0, 0), (1, 0, 0, 1)),
+        row0 + 9: ((0, 0, 1, 0), (0, 0, 1, 0), (0, 0, 0, 0), (1, 1, 1, 1)),
+        row0 + 10: ((0, 0, 1, 0), (0, 0, 1, 0), (1, 1, 1, 1), (1, 1, 0, 1)),
+        row0 + 11: ((0, 0, 1, 0), (0, 0, 1, 0), (1, 1, 1, 1), (1, 1, 0, 1)),
+        row0 + 12: ((0, 0, 1, 0), (0, 0, 1, 0), (1, 1, 1, 1), (1, 1, 0, 1)),
+        row0 + 13: ((0, 0, 1, 0), (0, 0, 1, 0), (1, 1, 1, 1), (1, 1, 0, 1)),
+        row0 + 14: ((0, 0, 1, 0), (0, 0, 1, 0), (1, 1, 1, 1), (1, 1, 0, 1)),
+        row0 + 15: ((0, 0, 1, 0), (0, 1, 1, 0), (1, 1, 1, 1), (1, 1, 0, 1)),
+        row0 + 16: ((0, 0, 1, 0), (1, 0, 1, 1), (1, 0, 0, 0), (1, 0, 0, 1)),
+        row0 + 17: ((0, 1, 1, 0), (0, 1, 1, 0), (0, 1, 0, 0), (1, 1, 1, 1)),
+    }
+    for r in range(row0, row0 + n_metric_rows):
+        is_pct_row = r in pct_only_rows
+        b_spec, c_spec, d_spec, e_spec = label_borders[r]
+        e_fill = layout.PCT_HEADER_FILL if is_pct_row else NO_FILL
+        _hcell(ws, r, col_B, fill=layout.HEADER_FILL, border=_b(b_spec))
+        _hcell(ws, r, col_C, fill=layout.HEADER_FILL, border=_b(c_spec))
+        _hcell(ws, r, col_D, fill=layout.HEADER_FILL, border=_b(d_spec))
+        _hcell(ws, r, col_E, fill=e_fill, border=_b(e_spec))
+    for r, (text, start_c, end_c) in label_rows.items():
+        if start_c != end_c:
+            ws.merge_cells(start_row=r, start_column=start_c, end_row=r, end_column=end_c)
+        ws.cell(row=r, column=start_c, value=text)
+    for r in pct_only_rows | {row0 + 17}:
+        ws.cell(row=r, column=col_E, value='%')
+    for r, text in leaf_labels.items():
+        ws.merge_cells(start_row=r, start_column=col_D, end_row=r, end_column=col_E)
+        ws.cell(row=r, column=col_D, value=text)
+
+    col0 = col_label + n_label_cols  # F
+    tall_rows = [hdr_r0]
+
+    for yi, year in enumerate(years):
+        year_col0 = col0 + yi * cols_per_year
+        year_last_col = year_col0 + cols_per_year - 1
+        ws.merge_cells(start_row=hdr_r0, start_column=year_col0, end_row=hdr_r0, end_column=year_last_col)
+        for c in range(year_col0, year_col0 + cols_per_year):
+            _hcell(ws, hdr_r0, c, border=Border(top=layout.THIN, bottom=layout.THIN, left=layout.THIN, right=layout.THIN))
+        ws.cell(row=hdr_r0, column=year_col0, value=year)
+
+        month_aggs = []
+        for mi, month in enumerate(months):
+            mcol = year_col0 + mi
+            is_first_month = mi == 0
+            is_last_month = mi == len(months) - 1
+            right = None if is_last_month else layout.THIN
+            left = None if is_first_month else layout.THIN
+            agg = _agg_sum([year_month_acc.finalize((year, month, d)) for d in DEPT_ORDER])
+            month_aggs.append(agg)
+            ws.merge_cells(start_row=hdr_r0 + 1, start_column=mcol, end_row=hdr_r0 + 2, end_column=mcol)
+            _hcell(ws, hdr_r0 + 1, mcol, f'{int(month) if str(month).isdigit() else month}월',
+                   border=Border(top=layout.THIN, bottom=layout.THIN, left=left, right=right))
+            _hcell(ws, hdr_r0 + 2, mcol,
+                   border=Border(top=None, bottom=layout.THIN, left=left, right=right))
+            write_metric_values_transposed(ws, mcol, row0, agg)
+
+        total_col = year_col0 + len(months)
+        ws.merge_cells(start_row=hdr_r0 + 1, start_column=total_col, end_row=hdr_r0 + 2, end_column=total_col)
+        _hcell(ws, hdr_r0 + 1, total_col, '누계',
+               border=Border(top=layout.THIN, bottom=layout.THIN, left=layout.THIN, right=None))
+        _hcell(ws, hdr_r0 + 2, total_col,
+               border=Border(top=None, bottom=layout.THIN, left=layout.THIN, right=None))
+        write_metric_values_transposed(ws, total_col, row0, _agg_sum(month_aggs))
+
+        for di, (d, short) in enumerate(zip(DEPT_ORDER, DEPTS_SHORT)):
+            dcol = total_col + 1 + di
+            is_last_dept = di == len(DEPT_ORDER) - 1
+            THIN = layout.THIN
+            row3_border = Border(top=THIN, bottom=None, left=None, right=(THIN if is_last_dept else None))
+            row4_border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
+            _hcell(ws, hdr_r0 + 1, dcol, border=row3_border)
+            _hcell(ws, hdr_r0 + 2, dcol, short, border=row4_border)
+            dept_month_aggs = [year_month_acc.finalize((year, month, d)) for month in months]
+            write_metric_values_transposed(ws, dcol, row0, _agg_sum(dept_month_aggs))
+
+    ws.column_dimensions[openpyxl.utils.get_column_letter(col_B)].width = 3.125
+    ws.column_dimensions[openpyxl.utils.get_column_letter(col_C)].width = 13.0
+    ws.column_dimensions[openpyxl.utils.get_column_letter(col_D)].width = 8.125
+    ws.column_dimensions[openpyxl.utils.get_column_letter(col_E)].width = 5.75
+    for yi in range(len(years)):
+        year_col0 = col0 + yi * cols_per_year
+        for c in range(year_col0, year_col0 + cols_per_year):
+            ws.column_dimensions[openpyxl.utils.get_column_letter(c)].width = 13.0
+    for r in tall_rows:
+        ws.row_dimensions[r].height = 17.25
+    for r in (row0 + 0, row0 + 1, row0 + 2, row0 + 4, row0 + 6, row0 + 8, row0 + 16):
+        ws.row_dimensions[r].height = 16.5
+    return ws
+
+
+# ---------------------------------------------------------------------------
 # 3) 월별_부문별 (연차 구분 없는 요약: 전체합산 블록 + 월별 블록)
 # ---------------------------------------------------------------------------
 
@@ -562,9 +773,16 @@ def _sum_period_parts(parts):
     for p in parts:
         origin_keys |= set(p.get('not_done_origin', {}).keys())
     not_done_origin = {j: sum(p.get('not_done_origin', {}).get(j, 0) for p in parts) for j in origin_keys}
+    final_accident = sum(p.get('final_accident', 0) for p in parts)
+    final_done = sum(p.get('final_done', 0) for p in parts)
+    final_not_done = sum(p.get('final_not_done', 0) for p in parts)
+    final_plan = sum(p.get('final_plan', 0) for p in parts)
+    final_codes = {cs: sum(p.get('final_codes', {}).get(cs, 0) for p in parts) for cs in CODE_STRS}
     return {'target': target, 'accident': accident, 'conv_target': conv_target,
             'done': done, 'max_done': max_done, 'not_done': not_done,
-            'plan': plan, 'codes': codes, 'idle': idle, 'not_done_origin': not_done_origin}
+            'plan': plan, 'codes': codes, 'idle': idle, 'not_done_origin': not_done_origin,
+            'final_accident': final_accident, 'final_done': final_done, 'final_not_done': final_not_done,
+            'final_plan': final_plan, 'final_codes': final_codes}
 
 
 def _period_metrics_for(period_acc, dept, period_key, tier):
@@ -583,8 +801,24 @@ def _period_reach(period_acc, dept, period_key):
 
 
 def _period_overall(period_acc, dept, period_key, tiers):
+    """'전체' 행 전용: 연차마다 다시 잡히는 target/done/not_done을 그대로 더하면
+    같은 계약이 여러 번 중복 집계된다. final_*(계약당 정확히 한 번, 그 계약이
+    실제로 도달한 마지막 연차에서만 기록됨)를 합산해서 구간 전체의 '서로 다른
+    계약 수' 기준으로 재구성한다. max_done/사고(accident)는 원래도 계약당 한
+    번만 기록되므로 그대로 합산한다."""
     parts = [_period_metrics_for(period_acc, dept, period_key, t) for t in tiers]
-    return _sum_period_parts(parts)
+    s = _sum_period_parts(parts)
+    final_accident = s['final_accident']
+    final_done = s['final_done']
+    final_not_done = s['final_not_done']
+    final_plan = s['final_plan']
+    final_codes = s['final_codes']
+    target = final_accident + final_done + final_not_done
+    conv_target = final_done + final_not_done
+    idle = final_not_done - (final_plan + sum(final_codes.values()))
+    return {'target': target, 'accident': final_accident, 'conv_target': conv_target,
+            'done': final_done, 'max_done': s['max_done'], 'not_done': final_not_done,
+            'plan': final_plan, 'codes': final_codes, 'idle': idle, 'not_done_origin': {}}
 
 
 def build_period_dept(wb, period_acc):
@@ -1053,6 +1287,7 @@ def build_glossary_sheet(wb):
 
     section('3. 시트별 보는 법')
     table_header(['시트명', '설명', ''])
+    term_row('월별_부문별_new', '연도(2025/2026)를 나란히 놓고 보는 달력 기준 시계열 시트. 아래 6번 참고.')
     term_row('월별_부문별', '1~12월 각 월 스냅샷 기준, 부문별(개인/전략/신사업) 현황을 연차 구분 없이 합산.')
     term_row('연차별_부문별_상세', '연차(1~4년차)별로 부문별 현황을 12개월 전체 합산.')
     term_row('월별_부문별_연차별', '월별 x 부문별 x 연차별(1~5년차)로 가장 세분화한 현황.')
@@ -1092,12 +1327,149 @@ def build_glossary_sheet(wb):
     para('검산: 한 행에 채워진 기원 연차별 칸을 모두 더하면, 그 행(그 연차)의 체결기간별_부문별 쪽 '
          '"전환미완료(E)" 값과 정확히 같습니다. "전체"(여러 연차를 합친) 행은 이 분해 기준 자체가 '
          '적용되지 않으므로 비워 둡니다.')
+    blank()
+
+    section('6. 월별_부문별_new 읽는 법')
+    para('이 시트는 "월별_부문별_연차별"과 같은 원본 계약 데이터를, 달력 연도 기준 시계열로 다시 '
+         '집계한 것입니다. 각 계약마다 "그 연도 그 달 시점엔 실제로 몇 연차였는지"를 역산해서, '
+         '그 연차에 해당하는 목표플랜/판정 기준으로 다시 계산합니다 - 지금(오늘) 몇 연차인지를 '
+         '그대로 재사용하지 않습니다.')
+    para('예를 들어 오늘 기준 4년차인 계약이 있다면, 그 계약은 2025년 시점엔 아직 4년차가 아니라 '
+         '3년차였습니다(1년씩 순서대로 올라가므로). 그래서 이 시트의 "2025년" 칸에서는 이 계약을 '
+         '3년차 기준(그때의 더 쉬운 목표플랜, 그때의 사고/전환 판정)으로 다시 계산해서 반영합니다. '
+         '아직 그 해에 존재하지도 않았던 계약(예: 올해 막 1년차가 된 계약의 2025년 이전 시점)은 '
+         '해당 연도 집계에서 완전히 제외됩니다.')
+    para('월별 값(1~12월, 각 달의 "누계"칸 포함)은 전사계(부문 구분 없는 합계) 기준입니다. '
+         '오른쪽의 개인/전략/신사업 칸은 월별로 나누지 않고, 그 연도 1년 누계(부문별) 값만 보여줍니다.')
+    para('주의: 계약은 자기 계약월에 매년 "생일"이 와야 다음 연차로 넘어갑니다. 오늘 기준으로 아직 '
+         '생일이 안 지난 달(현재월보다 큰 달)은 "올해" 데이터 자체가 아직 없으므로, 그런 달은 작년 '
+         '컬럼과 올해 컬럼이 같은 값을 보여줍니다(현재 시점 기준 가장 최신 값을 그대로 사용).')
+    blank()
 
     ws.column_dimensions['A'].width = 3
     ws.column_dimensions['B'].width = 22
     ws.column_dimensions['C'].width = 45
     ws.column_dimensions['D'].width = 20
     ws.column_dimensions['E'].width = 22
+    return ws
+
+
+def build_reference_sheet(wb, months, month_dept_acc, current_month=9):
+    """'참고' 시트: 완료율에 영향을 주는 주요 변수(1년차 진입 후 경과개월수)와
+    완료율의 상관관계를 실무자가 참고할 수 있도록 정리. 매 실행마다 실제
+    데이터로 다시 계산되며, 보고서의 다른 계산에는 영향을 주지 않는다."""
+    ws = wb.create_sheet('참고')
+    ws.sheet_view.showGridLines = False
+
+    TITLE_F = Font(name='맑은 고딕', size=16, bold=True)
+    SEC_F = Font(name='맑은 고딕', size=12, bold=True, color='FFFFFF')
+    SEC_FILL = PatternFill('solid', fgColor='4472C4')
+    HEAD_F = Font(name='맑은 고딕', size=10, bold=True)
+    HEAD_FILL = PatternFill('solid', fgColor='D9E1F2')
+    BODY_F = Font(name='맑은 고딕', size=10)
+    THIN = Side(style='thin', color='BFBFBF')
+    BORDER = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
+
+    row = [1]  # mutable row cursor
+
+    def title(text):
+        r = row[0]
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
+        c = ws.cell(row=r, column=2, value=text)
+        c.font = TITLE_F
+        c.alignment = Alignment(horizontal='left', vertical='center')
+        row[0] += 2
+
+    def section(text):
+        r = row[0]
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
+        c = ws.cell(row=r, column=2, value=text)
+        c.font = SEC_F
+        c.fill = SEC_FILL
+        c.alignment = Alignment(horizontal='left', vertical='center', indent=1)
+        ws.row_dimensions[r].height = 22
+        row[0] += 1
+
+    def para(text, height=45):
+        r = row[0]
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
+        for col in range(2, 7):
+            cc = ws.cell(row=r, column=col)
+            cc.font = BODY_F
+            cc.border = BORDER
+        c = ws.cell(row=r, column=2, value=text)
+        c.alignment = Alignment(horizontal='left', vertical='top', wrap_text=True)
+        ws.row_dimensions[r].height = height
+        row[0] += 1
+
+    def blank(n=1):
+        row[0] += n
+
+    title('참고 - 완료율에 영향을 주는 주요 변수')
+    para('이 시트는 "몇 연차가 된 지 얼마나 지났는지"(경과개월)가 전환완료율과 강한 상관관계를 '
+         '보인다는 확인 내용을 정리한 참고용 시트입니다. 매 실행 시 실제 데이터로 다시 계산되며, '
+         '보고서의 다른 계산에는 전혀 영향을 주지 않습니다.')
+    blank()
+
+    section('1년차 진입 후 경과개월 vs 완료율 (전사계, 1년차 기준)')
+    para('계약체결월별로 "그 달 계약이 1년차가 된 지 몇 개월이 지났는지"를 계산했습니다. 계약은 '
+         '자기 계약월에 매년 "생일"이 와야 다음 연차로 넘어가므로, 현재월(9월) 이전 달은 올해 이미 '
+         '생일이 지나 1년차가 된 지 (9－계약월)개월, 현재월 이후 달은 작년에 생일이 지나 1년차가 '
+         '된 지 (9＋12－계약월)개월이 지난 상태입니다.')
+
+    r = row[0]
+    headers = ['계약체결월', '1년차 진입 후\n경과개월', '1년차 대상', '1년차 완료', '완료율(%)']
+    for i, h in enumerate(headers):
+        c = ws.cell(row=r, column=2 + i, value=h)
+        c.font = HEAD_F
+        c.fill = HEAD_FILL
+        c.border = BORDER
+        c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    ws.row_dimensions[r].height = 28
+    row[0] += 1
+
+    rows_data = []
+    for month in months:
+        mi = int(month)
+        months_since = (current_month - mi) if mi <= current_month else (current_month + 12 - mi)
+        metrics_by_tier = calc.sum_metrics([month_dept_acc.finalize((month, d)) for d in DEPT_ORDER])
+        t1 = metrics_by_tier[1]
+        target, done = t1['conv_target'], t1['done']
+        rate = round(done / target * 100, 1) if target else None
+        rows_data.append((mi, months_since, target, done, rate))
+
+    for mi, months_since, target, done, rate in rows_data:
+        r = row[0]
+        for i, v in enumerate([f'{mi}월', months_since, target, done, rate]):
+            c = ws.cell(row=r, column=2 + i, value=v)
+            c.font = BODY_F
+            c.border = BORDER
+            c.alignment = Alignment(horizontal='center', vertical='center')
+        row[0] += 1
+    blank()
+
+    def _corr(xs, ys):
+        n = len(xs)
+        mx, my = sum(xs) / n, sum(ys) / n
+        cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / n
+        sx = (sum((x - mx) ** 2 for x in xs) / n) ** 0.5
+        sy = (sum((y - my) ** 2 for y in ys) / n) ** 0.5
+        return cov / (sx * sy) if sx and sy else None
+
+    valid = [(ms, tg, rt) for _, ms, tg, _, rt in rows_data if rt is not None]
+    corr_time = _corr([v[0] for v in valid], [v[2] for v in valid])
+    corr_vol = _corr([v[1] for v in valid], [v[2] for v in valid])
+
+    section('상관계수 요약')
+    para(f'경과개월수 vs 완료율 상관계수 = {corr_time:.2f}  /  1년차 대상 물량 vs 완료율 상관계수 = {corr_vol:.2f}',
+         height=30)
+    para('결론: 완료율은 "그 달 물량이 얼마나 많은지"보다 "1년차로 전환된 지 얼마나 시간이 지났는지"에 '
+         '훨씬 크게 좌우됩니다. 담당자가 접촉/처리할 시간이 누적될수록 완료율이 올라가는 것으로 보입니다 '
+         '(단, 특정 계약월 코호트 고유의 사정으로 예외가 있을 수 있습니다 - 예: 경과개월이 짧은 편임을 '
+         '고려해도 완료율이 유독 낮게 나타나는 달이 있을 수 있음).')
+
+    for col, width in zip('BCDEF', [12, 14, 12, 12, 12]):
+        ws.column_dimensions[col].width = width
     return ws
 
 
@@ -1109,6 +1481,7 @@ def build(data_paths, mapping_path, output_path):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
     build_glossary_sheet(wb)
+    build_month_dept_new(wb, result['months'], result['year_month_new'], years=[2025, 2026])
     build_month_dept_summary(wb, result['months'], result['month_dept'], result['all_dept'])
     build_tier_dept_summary(wb, result['all_dept'])
     build_month_dept_tier(wb, result['months'], result['month_dept'], result['all_dept'])
@@ -1116,6 +1489,7 @@ def build(data_paths, mapping_path, output_path):
     build_period_dept(wb, result['period_acc'])
     build_product_dept_tier(wb, result['products'], result['product_dept'])
     build_product_dept_summary(wb, result['products'], result['product_dept'])
+    build_reference_sheet(wb, result['months'], result['month_dept'])
     wb.save(output_path)
     print('저장 완료 ->', output_path)
 
