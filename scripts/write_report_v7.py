@@ -5,6 +5,7 @@ LibreOffice/Excel 수식은 전혀 쓰지 않는다(순수 값만 기록).
 """
 import os
 import sys
+from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -12,6 +13,7 @@ import openpyxl
 from openpyxl.styles import Alignment, Border, Side, Font, PatternFill
 
 NO_FILL = PatternFill(fill_type=None)
+WHITE_FILL = PatternFill('solid', fgColor='FFFFFF')
 
 THIN_SIDE = Side(style='thin')
 
@@ -227,6 +229,71 @@ def build_month_dept_tier(wb, months, month_dept_acc, all_dept_acc):
 
 
 # ---------------------------------------------------------------------------
+# 1.5) 월별_연차별 (부문 구분 없이 전사계만, 월별 x 연차별)
+# ---------------------------------------------------------------------------
+
+def build_month_tier(wb, months, month_dept_acc):
+    ws = wb.create_sheet('월별_연차별')
+    ws.sheet_view.showGridLines = False
+    col_month, col_tier = 2, 3
+    metric0 = 4
+    scell = ws.cell(row=1, column=metric0 + METRIC_WIDTH - 1, value=f'({date.today():%Y.%m.%d} 기준)')
+    scell.font = layout.STAMP_FONT
+    scell.alignment = Alignment(horizontal='right', vertical='bottom')
+
+    r0 = 2
+    ws.merge_cells(start_row=r0, start_column=col_month, end_row=r0 + 2, end_column=col_month)
+    for rr in range(r0, r0 + 3):
+        _hcell(ws, rr, col_month)
+    _hcell(ws, r0, col_month, '월')
+    ws.merge_cells(start_row=r0, start_column=col_tier, end_row=r0 + 2, end_column=col_tier)
+    for rr in range(r0, r0 + 3):
+        _hcell(ws, rr, col_tier)
+    _hcell(ws, r0, col_tier, '연차')
+    write_metric_header(ws, r0, metric0)
+
+    row = r0 + 3
+    tall_rows = [r0]
+    for month in months:
+        month_start = row
+        total_metrics = calc.sum_metrics([month_dept_acc.finalize((month, d)) for d in DEPT_ORDER])
+        agg = _agg_all_tiers(total_metrics)
+
+        set_value_label(ws, row, col_tier, '합계')
+        write_metric_values(ws, row, metric0, agg)
+        layout._metric_fill(ws, row, metric0, TOTAL_FILL)
+        layout._metric_border(ws, row, metric0)
+        ws.cell(row=row, column=col_tier).fill = TOTAL_FILL
+        for t in TIERS:
+            r = row + t
+            set_value_label(ws, r, col_tier, t)
+            write_metric_values(ws, r, metric0, total_metrics[t])
+            layout._metric_fill(ws, r, metric0, WHITE_FILL)
+            layout._metric_border(ws, r, metric0)
+            ws.cell(row=r, column=col_tier).fill = WHITE_FILL
+        for r in range(row, row + 6):
+            set_label_border(ws, r, (col_tier,))
+
+        ws.cell(row=row, column=col_month).fill = TOTAL_FILL
+        for r in range(row, row + 6):
+            set_label_border(ws, r, (col_month,), top=(r == row), bottom=(r == row + 5))
+        set_value_label(ws, row, col_month, int(month) if str(month).isdigit() else month)
+        ws.merge_cells(start_row=row, start_column=col_month, end_row=row + 5, end_column=col_month)
+
+        row = month_start + 6
+
+    widths = {'B': 5.625, 'C': 5.25}
+    for off, width in ((0, 8.375), (3, 6.625), (5, 6.625), (6, 10.375), (7, 6.625),
+                       (8, 8.375), (9, 6.625), (15, 8.625), (16, 8.375), (17, 6.625)):
+        widths[openpyxl.utils.get_column_letter(metric0 + off)] = width
+    for col, width in widths.items():
+        ws.column_dimensions[col].width = width
+    for r in tall_rows:
+        ws.row_dimensions[r].height = 17.25
+    return ws
+
+
+# ---------------------------------------------------------------------------
 # 2) 연차별_부문별_상세 (전체 기간 합산, 부문 x 연차1~4)
 # ---------------------------------------------------------------------------
 
@@ -395,12 +462,13 @@ def write_metric_values_transposed(ws, col, row0, m):
     setv(17, _ratio(idle, conv_target), True)
 
 
-def build_month_dept_new(wb, months, year_month_acc, years):
+def build_month_dept_new(wb, months, year_month_acc, years, reference_year):
     """years: 왼쪽부터 표시할 연도 목록(예: [2025, 2026], 나중에 2024/2027 등을
     앞뒤에 추가하면 자동으로 확장됨). year_month_acc: calc.compute_all()의
     result['year_month_new'] - 계약별로 각 연도 시점 실제 연차를 역산해서 그
     연차 기준 v값/목표플랜으로 이미 다시 판정해 둔 (연도,월,부문) 집계이므로,
-    여기서는 그대로 부문 합산/월 합산만 하면 된다."""
+    여기서는 그대로 부문 합산/월 합산만 하면 된다. reference_year보다 미래인
+    연도는 실제로 계산할 방법이 없으므로 그 연도 블록은 전부 빈칸으로 둔다."""
     ws = wb.create_sheet('월별_부문별_new')
     ws.sheet_view.showGridLines = False
 
@@ -420,7 +488,7 @@ def build_month_dept_new(wb, months, year_month_acc, years):
     col_B, col_C, col_D, col_E = col_label, col_label + 1, col_label + 2, col_label + 3
 
     label_rows = {
-        row0 + 0: ('유지계약 A', col_B, col_E),
+        row0 + 0: ('도래계약(유지중) A', col_B, col_E),
         row0 + 1: ('사고有 B', col_B, col_E),
         row0 + 2: ('전환대상 C (A-B)', col_B, col_E),
         row0 + 4: ('전환완료 D', col_B, col_E),
@@ -481,6 +549,7 @@ def build_month_dept_new(wb, months, year_month_acc, years):
     tall_rows = [hdr_r0]
 
     for yi, year in enumerate(years):
+        is_future = year > reference_year
         year_col0 = col0 + yi * cols_per_year
         year_last_col = year_col0 + cols_per_year - 1
         ws.merge_cells(start_row=hdr_r0, start_column=year_col0, end_row=hdr_r0, end_column=year_last_col)
@@ -495,7 +564,7 @@ def build_month_dept_new(wb, months, year_month_acc, years):
             is_last_month = mi == len(months) - 1
             right = None if is_last_month else layout.THIN
             left = None if is_first_month else layout.THIN
-            agg = _agg_sum([year_month_acc.finalize((year, month, d)) for d in DEPT_ORDER])
+            agg = None if is_future else _agg_sum([year_month_acc.finalize((year, month, d)) for d in DEPT_ORDER])
             month_aggs.append(agg)
             ws.merge_cells(start_row=hdr_r0 + 1, start_column=mcol, end_row=hdr_r0 + 2, end_column=mcol)
             _hcell(ws, hdr_r0 + 1, mcol, f'{int(month) if str(month).isdigit() else month}월',
@@ -520,8 +589,8 @@ def build_month_dept_new(wb, months, year_month_acc, years):
             row4_border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
             _hcell(ws, hdr_r0 + 1, dcol, border=row3_border)
             _hcell(ws, hdr_r0 + 2, dcol, short, border=row4_border)
-            dept_month_aggs = [year_month_acc.finalize((year, month, d)) for month in months]
-            write_metric_values_transposed(ws, dcol, row0, _agg_sum(dept_month_aggs))
+            dept_month_aggs = None if is_future else [year_month_acc.finalize((year, month, d)) for month in months]
+            write_metric_values_transposed(ws, dcol, row0, _agg_sum(dept_month_aggs) if dept_month_aggs else None)
 
     ws.column_dimensions[openpyxl.utils.get_column_letter(col_B)].width = 3.125
     ws.column_dimensions[openpyxl.utils.get_column_letter(col_C)].width = 13.0
@@ -821,8 +890,8 @@ def _period_overall(period_acc, dept, period_key, tiers):
             'plan': final_plan, 'codes': final_codes, 'idle': idle, 'not_done_origin': {}}
 
 
-def build_period_dept(wb, period_acc):
-    """PERIODS 순서(오래된 구간부터)로 실제 도달 연차만큼만 행을 만든다."""
+def build_period_dept(wb, period_acc, periods=PERIODS):
+    """periods 순서(오래된 구간부터)로 실제 도달 연차만큼만 행을 만든다."""
     ws = wb.create_sheet('쳬결기간별_부문별')
     ws.sheet_view.showGridLines = False
     col_gw, col_g, col_period, col_key, col_tier = 2, 3, 4, 5, 6
@@ -852,7 +921,7 @@ def build_period_dept(wb, period_acc):
     for label, lookup_key in [('전사 계', '전사 계')] + list(zip(DEPTS_SHORT, DEPT_ORDER)):
         g_start = row
         is_total = label == '전사 계'
-        for plabel, key, _start, _end in PERIODS:
+        for plabel, key, _start, _end in periods:
             reach_tiers = _period_reach(period_acc, lookup_key, key)
             if not reach_tiers:
                 continue
@@ -1069,7 +1138,7 @@ def write_remaining_origin_values(ws, row, col0, m, up_to_tier):
         pc.alignment = Alignment(horizontal='right', vertical='center')
 
 
-def build_period_dept_remaining(wb, period_acc):
+def build_period_dept_remaining(wb, period_acc, periods=PERIODS):
     ws = wb.create_sheet('체결기간별_부문별_잔여미완료')
     ws.sheet_view.showGridLines = False
     col_gw, col_g, col_period, col_key, col_tier = 2, 3, 4, 5, 6
@@ -1103,7 +1172,7 @@ def build_period_dept_remaining(wb, period_acc):
     for label, lookup_key in [('전사 계', '전사 계')] + list(zip(DEPTS_SHORT, DEPT_ORDER)):
         g_start = row
         is_total = label == '전사 계'
-        for plabel, key, _start, _end in PERIODS:
+        for plabel, key, _start, _end in periods:
             reach_tiers = _period_reach(period_acc, lookup_key, key)
             if not reach_tiers:
                 continue
@@ -1354,10 +1423,13 @@ def build_glossary_sheet(wb):
     return ws
 
 
-def build_reference_sheet(wb, months, month_dept_acc, current_month=9):
+def build_reference_sheet(wb, months, month_dept_acc, current_month=None):
     """'참고' 시트: 완료율에 영향을 주는 주요 변수(1년차 진입 후 경과개월수)와
     완료율의 상관관계를 실무자가 참고할 수 있도록 정리. 매 실행마다 실제
-    데이터로 다시 계산되며, 보고서의 다른 계산에는 영향을 주지 않는다."""
+    데이터로 다시 계산되며, 보고서의 다른 계산에는 영향을 주지 않는다.
+    current_month을 생략하면 실행 시점의 실제 오늘 월을 쓴다."""
+    if current_month is None:
+        current_month = date.today().month
     ws = wb.create_sheet('참고')
     ws.sheet_view.showGridLines = False
 
@@ -1473,23 +1545,37 @@ def build_reference_sheet(wb, months, month_dept_acc, current_month=9):
     return ws
 
 
-def build(data_paths, mapping_path, output_path):
+def build(data_paths, mapping_path, output_path, reference_year=None, current_month=None,
+          new_sheet_years=None, period_pairs=None):
+    """reference_year/current_month: "오늘"에 해당하는 연/월(월별_부문별_new,
+    참고 시트에서 씀). 둘 다 생략하면 실행 시점의 실제 오늘 날짜를 쓴다. 과거
+    특정 시점 기준으로 다시 계산하고 싶을 때만 명시적으로 넘긴다.
+    new_sheet_years: 월별_부문별_new에 나란히 보여줄 연도 목록(예: [2025, 2026]).
+    생략하면 (reference_year-1, reference_year) 두 해를 자동으로 쓴다.
+    period_pairs: 체결기간별_부문별의 "구간" 목록 - (시작YYYYMM, 종료YYYYMM)
+    쌍의 리스트(예: [('202207','202306'), ('202307','202406')]). 생략하면
+    calc_report_v7.PERIODS(기본 구간)를 그대로 쓴다."""
+    periods = calc.make_periods(period_pairs) if period_pairs is not None else None
     print('[1/2] 데이터 계산 중(파이썬 직접 계산, LibreOffice 미사용)...')
-    result = calc.compute_all(data_paths, mapping_path)
+    result = calc.compute_all(data_paths, mapping_path,
+                               reference_year=reference_year, current_month=current_month,
+                               new_sheet_years=new_sheet_years, periods=periods)
 
     print('[2/2] 보고서 시트 작성 중...')
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
     build_glossary_sheet(wb)
-    build_month_dept_new(wb, result['months'], result['year_month_new'], years=[2025, 2026])
+    build_month_dept_new(wb, result['months'], result['year_month_new'], years=result['new_sheet_years'],
+                          reference_year=result['reference_year'])
     build_month_dept_summary(wb, result['months'], result['month_dept'], result['all_dept'])
     build_tier_dept_summary(wb, result['all_dept'])
+    build_month_tier(wb, result['months'], result['month_dept'])
     build_month_dept_tier(wb, result['months'], result['month_dept'], result['all_dept'])
-    build_period_dept_remaining(wb, result['period_acc'])
-    build_period_dept(wb, result['period_acc'])
+    build_period_dept_remaining(wb, result['period_acc'], periods=result['periods'])
+    build_period_dept(wb, result['period_acc'], periods=result['periods'])
     build_product_dept_tier(wb, result['products'], result['product_dept'])
     build_product_dept_summary(wb, result['products'], result['product_dept'])
-    build_reference_sheet(wb, result['months'], result['month_dept'])
+    build_reference_sheet(wb, result['months'], result['month_dept'], current_month=result['current_month'])
     wb.save(output_path)
     print('저장 완료 ->', output_path)
 

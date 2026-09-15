@@ -44,8 +44,21 @@ PERIODS = [
 ]
 
 
-def period_of(ym):
-    for label, key, start, end in PERIODS:
+def make_periods(pairs):
+    """(시작YYYYMM, 종료YYYYMM) 쌍 목록 -> PERIODS와 같은 형식의
+    (라벨, 구간번호, 시작, 종료) 목록. GUI에서 사용자가 입력한 구간을
+    계산에 쓰기 좋은 형태로 변환할 때 쓴다."""
+    periods = []
+    for i, (start, end) in enumerate(pairs):
+        label = f'{start[:4]}.{start[4:]}~{end[:4]}.{end[4:]}'
+        periods.append((label, i + 1, start, end))
+    return periods
+
+
+def period_of(ym, periods=None):
+    if periods is None:
+        periods = PERIODS
+    for label, key, start, end in periods:
         if start <= ym <= end:
             return label, key
     return None, None
@@ -429,12 +442,26 @@ class PeriodAccum:
 # ---------------------------------------------------------------------------
 
 def compute_all(data_paths, mapping_path, progress_every=100000,
-                 new_sheet_years=(2025, 2026), reference_year=2026, current_month=9):
+                 new_sheet_years=None, reference_year=None, current_month=None, periods=None):
     """new_sheet_years/reference_year/current_month: "월별_부문별_new" 시트 전용
     (year_month_new 결과). reference_year/current_month는 이 데이터를 만든
     "오늘"에 해당하는 연/월 - 계약은 자기 계약월에 매년 생일이 와야 다음 연차로
     넘어가므로, 그 달이 current_month 이전/이후인지에 따라 지금 기록된 경과년수가
-    실제로 몇 년도에 갱신된 것인지가 달라진다(아래 vintage_year 계산 참고)."""
+    실제로 몇 년도에 갱신된 것인지가 달라진다(아래 vintage_year 계산 참고). 셋 다
+    생략하면 실행 시점의 실제 오늘 날짜로 자동 계산된다(수동으로 매번 갱신할
+    필요 없음). periods: 체결기간별_부문별의 "구간" 목록(생략하면 모듈 상수
+    PERIODS 사용) - make_periods()로 만든 형식."""
+    if reference_year is None or current_month is None:
+        today = date.today()
+        if reference_year is None:
+            reference_year = today.year
+        if current_month is None:
+            current_month = today.month
+    if periods is None:
+        periods = PERIODS
+    if new_sheet_years is None:
+        new_sheet_years = (reference_year - 1, reference_year)
+
     lookup, maxmap, seq = load_mapping(mapping_path)
     cols = get_cols(data_paths[0])
 
@@ -491,10 +518,12 @@ def compute_all(data_paths, mapping_path, progress_every=100000,
             offset = 1 if m_int > current_month else 0
             vintage_year = reference_year - tier - offset
             for target_year in new_sheet_years:
+                if target_year > reference_year:
+                    continue  # 아직 오지 않은 미래 연도 - write_report_v7 쪽에서 빈칸으로 표시
                 e = target_year - vintage_year
                 if e < 1:
                     continue  # 그 계약은 target_year 시점엔 아직 존재하지 않았음
-                e = min(e, tier)  # target_year가 미래라 아직 도달 못한 경우 현재까지의 값으로 대체
+                e = min(e, tier)  # target_year==reference_year인데 아직 올해 생일 전인 달은 현재값으로 대체
                 v_this_e = vlist[e - 1]
                 v_prev_e = vlist[e - 2] if e > 1 else None
                 target_plan_e = elapsed_target(lookup, maxmap, initial_plan, e)
@@ -506,7 +535,7 @@ def compute_all(data_paths, mapping_path, progress_every=100000,
             start = row[cols.start]
             if start:
                 ym = str(start)[:6]
-                _plabel, pkey = period_of(ym)
+                _plabel, pkey = period_of(ym, periods)
                 if pkey is not None:
                     k = completed_tier(seq, initial_plan, current_plan)
                     period_acc.add(dept, pkey, tier, k, current_plan, mm, vlist, code)
@@ -515,6 +544,8 @@ def compute_all(data_paths, mapping_path, progress_every=100000,
     return {
         'month_dept': month_dept, 'all_dept': all_dept, 'product_dept': product_dept,
         'period_acc': period_acc, 'year_month_new': year_month_new,
+        'new_sheet_years': list(new_sheet_years), 'reference_year': reference_year,
+        'current_month': current_month, 'periods': periods,
         'months': sorted(months_seen, key=lambda m: int(m)),
         'products': sorted(products_seen),
     }

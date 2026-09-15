@@ -7,15 +7,18 @@ import queue
 import sys
 import threading
 import traceback
+from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import calc_report_v7
 import write_report_v7
 
 APP_TITLE = '무사고전환 보고서 생성기'
+MAX_PERIOD_ROWS = 7
 
 
 class TextRedirector:
@@ -36,12 +39,22 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry('720x560')
-        self.minsize(640, 500)
+        self.geometry('760x900')
+        self.minsize(680, 700)
 
         self.data_files = []
         self.mapping_path = tk.StringVar()
         self.output_path = tk.StringVar()
+        self.ref_date = tk.StringVar(value=date.today().strftime('%Y-%m'))
+        today = date.today()
+        self.new_sheet_years = tk.StringVar(value=f'{today.year - 1}~{today.year}')
+        self.period_vars = []
+        for i in range(MAX_PERIOD_ROWS):
+            if i < len(calc_report_v7.PERIODS):
+                _label, _key, start, end = calc_report_v7.PERIODS[i]
+            else:
+                start, end = '', ''
+            self.period_vars.append((tk.StringVar(value=start), tk.StringVar(value=end)))
         self.msg_queue = queue.Queue()
         self.worker = None
 
@@ -77,7 +90,42 @@ class App(tk.Tk):
         ttk.Label(frm_map, text='비워두면 위 분석 데이터 중 첫 번째 파일을 매핑테이블로도 사용합니다.',
                   foreground='#666666').pack(fill='x', padx=10, pady=(0, 10))
 
-        frm_out = ttk.LabelFrame(self, text='3. 결과 저장 위치')
+        frm_ref = ttk.LabelFrame(self, text='3. 계산 기준 시점 (YYYY-MM)')
+        frm_ref.pack(fill='x', **pad)
+        row_ref = ttk.Frame(frm_ref)
+        row_ref.pack(fill='x', padx=10, pady=(10, 2))
+        ttk.Entry(row_ref, textvariable=self.ref_date, width=12).pack(side='left')
+        ttk.Label(frm_ref,
+                  text='"월별_부문별_new"/"참고" 시트가 기준으로 삼는 시점입니다. '
+                       '기본값은 오늘 날짜이며, 과거 특정 시점 기준으로 계산하고 싶을 때만 바꾸세요.',
+                  foreground='#666666').pack(fill='x', padx=10, pady=(0, 10))
+
+        frm_years = ttk.LabelFrame(self, text='4. 월별_부문별_new 표시연도 (YYYY~YYYY)')
+        frm_years.pack(fill='x', **pad)
+        row_years = ttk.Frame(frm_years)
+        row_years.pack(fill='x', padx=10, pady=(10, 2))
+        ttk.Entry(row_years, textvariable=self.new_sheet_years, width=14).pack(side='left')
+        ttk.Label(frm_years,
+                  text='"월별_부문별_new" 시트에 나란히 보여줄 연도 범위입니다(양 끝 연도 포함). '
+                       '예: 2025~2026, 2024~2026.',
+                  foreground='#666666').pack(fill='x', padx=10, pady=(0, 10))
+
+        frm_periods = ttk.LabelFrame(
+            self, text='5. 체결기간별 구간 설정 (최대 7개, 시작~종료 YYYYMM, 비워두면 그 구간은 사용 안 함)')
+        frm_periods.pack(fill='x', **pad)
+        grid_periods = ttk.Frame(frm_periods)
+        grid_periods.pack(fill='x', padx=10, pady=(10, 2))
+        ttk.Label(grid_periods, text='구간').grid(row=0, column=0, padx=(0, 6), pady=2)
+        ttk.Label(grid_periods, text='시작(YYYYMM)').grid(row=0, column=1, padx=(0, 6), pady=2)
+        ttk.Label(grid_periods, text='종료(YYYYMM)').grid(row=0, column=2, pady=2)
+        for i, (start_var, end_var) in enumerate(self.period_vars):
+            ttk.Label(grid_periods, text=f'{i + 1}구간').grid(row=i + 1, column=0, padx=(0, 6), pady=2, sticky='w')
+            ttk.Entry(grid_periods, textvariable=start_var, width=10).grid(row=i + 1, column=1, padx=(0, 6), pady=2)
+            ttk.Entry(grid_periods, textvariable=end_var, width=10).grid(row=i + 1, column=2, pady=2)
+        ttk.Label(frm_periods, text='보험기간 시작일 기준 12개월 단위 구간입니다. 채워진 구간만 계산에 사용됩니다.',
+                  foreground='#666666').pack(fill='x', padx=10, pady=(4, 10))
+
+        frm_out = ttk.LabelFrame(self, text='6. 결과 저장 위치')
         frm_out.pack(fill='x', **pad)
         ent = ttk.Entry(frm_out, textvariable=self.output_path)
         ent.pack(side='left', fill='x', expand=True, padx=(10, 0), pady=10)
@@ -142,6 +190,40 @@ class App(tk.Tk):
 
         mapping = self.mapping_path.get().strip() or self.data_files[0]
 
+        ref_date_str = self.ref_date.get().strip()
+        try:
+            ref_year, ref_month = (int(p) for p in ref_date_str.split('-'))
+            if not (1 <= ref_month <= 12):
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning(APP_TITLE, '계산 기준 시점은 "YYYY-MM" 형식으로 입력해 주세요. (예: 2026-09)')
+            return
+
+        years_str = self.new_sheet_years.get().strip()
+        try:
+            y_start, y_end = (int(p) for p in years_str.split('~'))
+            if y_start > y_end:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning(APP_TITLE, '표시연도는 "YYYY~YYYY" 형식으로 입력해 주세요. (예: 2025~2026)')
+            return
+        new_sheet_years = list(range(y_start, y_end + 1))
+
+        period_pairs = []
+        for i, (start_var, end_var) in enumerate(self.period_vars):
+            start = start_var.get().strip()
+            end = end_var.get().strip()
+            if not start and not end:
+                continue
+            if not (len(start) == 6 and start.isdigit() and len(end) == 6 and end.isdigit() and start <= end):
+                messagebox.showwarning(
+                    APP_TITLE, f'{i + 1}구간의 시작/종료를 "YYYYMM" 형식으로 올바르게 입력해 주세요. (예: 202207)')
+                return
+            period_pairs.append((start, end))
+        if not period_pairs:
+            messagebox.showwarning(APP_TITLE, '체결기간별 구간을 하나 이상 입력해 주세요.')
+            return
+
         self.btn_run.config(state='disabled')
         self.progress.start(12)
         self.txt_log.config(state='normal')
@@ -149,14 +231,18 @@ class App(tk.Tk):
         self.txt_log.config(state='disabled')
 
         self.worker = threading.Thread(
-            target=self._run_worker, args=(list(self.data_files), mapping, out), daemon=True)
+            target=self._run_worker,
+            args=(list(self.data_files), mapping, out, ref_year, ref_month, new_sheet_years, period_pairs),
+            daemon=True)
         self.worker.start()
 
-    def _run_worker(self, data_paths, mapping_path, out):
+    def _run_worker(self, data_paths, mapping_path, out, ref_year, ref_month, new_sheet_years, period_pairs):
         old_stdout = sys.stdout
         sys.stdout = TextRedirector(self.msg_queue)
         try:
-            write_report_v7.build(data_paths, mapping_path, out)
+            write_report_v7.build(data_paths, mapping_path, out,
+                                   reference_year=ref_year, current_month=ref_month,
+                                   new_sheet_years=new_sheet_years, period_pairs=period_pairs)
             self.msg_queue.put(('done', out))
         except Exception:
             self.msg_queue.put(('error', traceback.format_exc()))
