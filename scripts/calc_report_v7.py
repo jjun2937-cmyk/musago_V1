@@ -470,6 +470,7 @@ def compute_all(data_paths, mapping_path, progress_every=100000,
     product_dept = TierAccum()    # key=(product,dept)
     period_acc = PeriodAccum()
     year_month_new = YearMonthAccum()  # key=(target_year,month,dept) - 월별_부문별_new 전용
+    year_month_tier_new = YearMonthAccum()  # key=(target_year,month,dept,e) - 월별_부문별_new_상세 전용
 
     months_seen = set()
     products_seen = set()
@@ -517,6 +518,15 @@ def compute_all(data_paths, mapping_path, progress_every=100000,
         if m_int is not None:
             offset = 1 if m_int > current_month else 0
             vintage_year = reference_year - tier - offset
+            # 과거 연도(e < tier)의 "완료" 판정에는 오늘의 current_plan을 그 해의
+            # 목표플랜과 직접 비교할 수 없다(현재 정상적으로 매년 갱신 중인 계약은
+            # 이미 그 해의 목표플랜을 지나쳐서 오늘 플랜과 더 이상 일치하지 않기
+            # 때문). 대신 seq상 current_plan이 몇 년차 목표까지 도달했는지(k_reached)
+            # 를 구해서, "그 해(e) 목표 이상을 이미 달성했는가"로 판정한다 - 정확히
+            # e년차에 달성했는지는 알 수 없지만(그 사이 언젠가는 달성한 것은 확실),
+            # 현재 플랜은 한번 올라가면 내려가지 않으므로 최소한 그 단계는 이미
+            # 지났다는 것만은 보장된다.
+            k_reached = completed_tier(seq, initial_plan, current_plan)
             for target_year in new_sheet_years:
                 if target_year > reference_year:
                     continue  # 아직 오지 않은 미래 연도 - write_report_v7 쪽에서 빈칸으로 표시
@@ -526,10 +536,14 @@ def compute_all(data_paths, mapping_path, progress_every=100000,
                 e = min(e, tier)  # target_year==reference_year인데 아직 올해 생일 전인 달은 현재값으로 대체
                 v_this_e = vlist[e - 1]
                 v_prev_e = vlist[e - 2] if e > 1 else None
-                target_plan_e = elapsed_target(lookup, maxmap, initial_plan, e)
-                as_flag_e = (target_plan_e is not None and current_plan == target_plan_e)
+                if e == tier:
+                    target_plan_e = elapsed_target(lookup, maxmap, initial_plan, e)
+                    as_flag_e = (target_plan_e is not None and current_plan == target_plan_e)
+                else:
+                    as_flag_e = k_reached >= e
                 yc_e = (mm is not None and mm[0] < e)
                 year_month_new.add((target_year, month, dept), e, v_this_e, v_prev_e, as_flag_e, yc_e, code)
+                year_month_tier_new.add((target_year, month, dept, e), e, v_this_e, v_prev_e, as_flag_e, yc_e, code)
 
         if cols.start is not None:
             start = row[cols.start]
@@ -544,6 +558,7 @@ def compute_all(data_paths, mapping_path, progress_every=100000,
     return {
         'month_dept': month_dept, 'all_dept': all_dept, 'product_dept': product_dept,
         'period_acc': period_acc, 'year_month_new': year_month_new,
+        'year_month_tier_new': year_month_tier_new,
         'new_sheet_years': list(new_sheet_years), 'reference_year': reference_year,
         'current_month': current_month, 'periods': periods,
         'months': sorted(months_seen, key=lambda m: int(m)),
